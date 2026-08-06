@@ -4,9 +4,7 @@ import numpy as np
 
 from tech_monitoring.config import settings
 from tech_monitoring.db.connection import get_connection
-
-# 클러스터당 이 정도(5개) 이상 신뢰 매체가 동시 보도하면 파급력 신호로 포화(1.0) [확인 필요]
-CLUSTER_SIZE_SATURATION = 5
+from tech_monitoring.filters.stage3_impact import CLUSTER_SIZE_SATURATION
 
 
 def _cosine_sim_matrix(vectors: np.ndarray) -> np.ndarray:
@@ -69,7 +67,7 @@ def apply_stage5() -> dict:
                 """
                 UPDATE articles
                 SET cluster_id = %s,
-                    importance_signals = importance_signals || %s::jsonb
+                    impact_signals = impact_signals || %s::jsonb
                 WHERE id = %s
                 """,
                 (

@@ -36,7 +36,7 @@ def apply_stage1(batch_size: int = 1000) -> dict:
                     """
                     UPDATE articles
                     SET status = 'archived',
-                        importance_signals = importance_signals || jsonb_build_object('filtered_stage', 'stage1', 'reason', %s::text)
+                        impact_signals = impact_signals || jsonb_build_object('filtered_stage', 'stage1', 'reason', %s::text)
                     WHERE id = %s
                     """,
                     (reason, article_id),

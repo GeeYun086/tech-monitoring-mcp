@@ -13,18 +13,34 @@ def _build_tsquery(keywords: list[str]) -> str:
     return " | ".join(f"({t})" for t in terms)
 
 
+def topic_embedding_text(name: str, description: str | None, keywords: list[str]) -> str:
+    """주제 벡터의 기준 텍스트.
+
+    설계서 v2.0 §5: 관련도는 키워드 목록이 아니라 'AX 시장' 의미 서술과의 유사도로 넓게 판단.
+    따라서 description을 우선 사용하고, keywords는 비어 있는 것이 정상(보조 수단으로만 남김).
+    """
+    parts = [name]
+    if description:
+        parts.append(description)
+    if keywords:
+        parts.append(" ".join(keywords))
+    return ": ".join(parts)
+
+
 def embed_missing_topics(conn) -> int:
     with conn.cursor() as cur:
-        cur.execute("SELECT id, name, keywords FROM topics WHERE active AND embedding IS NULL")
+        cur.execute(
+            "SELECT id, name, description, keywords FROM topics WHERE active AND embedding IS NULL"
+        )
         rows = cur.fetchall()
     if not rows:
         return 0
 
-    texts = [f"{name}: {' '.join(keywords)}" for _, name, keywords in rows]
+    texts = [topic_embedding_text(name, description, keywords) for _, name, description, keywords in rows]
     vectors = embed_texts(texts)
 
     with conn.cursor() as cur:
-        for (topic_id, _, _), vector in zip(rows, vectors):
+        for (topic_id, *_), vector in zip(rows, vectors):
             cur.execute("UPDATE topics SET embedding = %s WHERE id = %s", (vector, topic_id))
     return len(rows)
 
@@ -133,7 +149,7 @@ def apply_stage2() -> dict:
             """
             UPDATE articles
             SET status = 'archived',
-                importance_signals = importance_signals || '{"filtered_stage": "stage2", "reason": "no_relevance_match"}'::jsonb
+                impact_signals = impact_signals || '{"filtered_stage": "stage2", "reason": "no_relevance_match"}'::jsonb
             WHERE status = 'new' AND NOT (id = ANY(%s))
             """,
             (passed_ids,),

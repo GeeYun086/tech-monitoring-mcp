@@ -5,8 +5,8 @@ from tech_monitoring.db.connection import get_connection
 
 MODEL_NAME = "BAAI/bge-reranker-v2-m3"
 
-# 리랭커 쿼리 — 실제 "회사 관점" 기준은 담당자 확인 후 대체 [확인 필요]
-DEFAULT_QUERY = "회사 관점에서 중요하고 파급력이 큰 산업/경쟁사 동향 뉴스"
+# 리랭커 쿼리 — 회사 관점 중요도가 아니라 'AX 시장에서 반향이 큰가'만 본다 (설계서 v2.0 §5)
+DEFAULT_QUERY = "AX(AI 전환) 시장에서 반향과 파급력이 큰 이슈"
 
 
 @lru_cache(maxsize=1)
@@ -17,14 +17,14 @@ def get_reranker():
 
 
 def rerank_top_candidates(top_n: int = 30, query: str = DEFAULT_QUERY) -> dict:
-    """중요도 상위 후보만 리랭커로 재정렬 (비싼 단계는 소수에만 적용)."""
+    """파급력 상위 후보만 리랭커로 재정렬 (비싼 단계는 소수에만 적용)."""
     conn = get_connection()
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT id, title, summary, content, importance_signals FROM articles
+            SELECT id, title, summary, content, impact_signals FROM articles
             WHERE status = 'new'
-            ORDER BY importance_score DESC NULLS LAST
+            ORDER BY impact_score DESC NULLS LAST
             LIMIT %s
             """,
             (top_n,),
@@ -42,9 +42,9 @@ def rerank_top_candidates(top_n: int = 30, query: str = DEFAULT_QUERY) -> dict:
 
     with conn.cursor() as cur:
         for row, score in zip(rows, scores):
-            merged = {**(row["importance_signals"] or {}), "rerank_score": float(score)}
+            merged = {**(row["impact_signals"] or {}), "rerank_score": float(score)}
             cur.execute(
-                "UPDATE articles SET importance_signals = %s::jsonb WHERE id = %s",
+                "UPDATE articles SET impact_signals = %s::jsonb WHERE id = %s",
                 (json.dumps(merged), row["id"]),
             )
 
