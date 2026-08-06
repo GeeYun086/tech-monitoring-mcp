@@ -1,5 +1,3 @@
-import html
-import re
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 
@@ -7,16 +5,11 @@ import httpx
 
 from tech_monitoring.config import settings
 from tech_monitoring.db.connection import get_connection
+from tech_monitoring.utils.text import strip_html
 from tech_monitoring.utils.url_normalize import normalize_url
 
 HN_ALGOLIA_URL = "https://hn.algolia.com/api/v1/search_by_date"
 NAVER_NEWS_URL = "https://openapi.naver.com/v1/search/news.json"
-
-_TAG_RE = re.compile(r"<[^>]+>")
-
-
-def _strip_tags(text: str) -> str:
-    return html.unescape(_TAG_RE.sub("", text or ""))
 
 
 def _get_active_keywords(conn) -> list[str]:
@@ -136,10 +129,10 @@ def collect_naver_news(conn, keywords: list[str]) -> dict:
             url = item.get("originallink") or item["link"]
             if _insert_article(
                 conn, source,
-                title=_strip_tags(item["title"]),
+                title=strip_html(item["title"]),
                 url=url,
                 url_canonical=normalize_url(url),
-                summary=_strip_tags(item.get("description", "")),
+                summary=strip_html(item.get("description", "")),
                 published_at=published_at,
             ):
                 inserted += 1

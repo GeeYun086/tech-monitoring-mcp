@@ -18,6 +18,10 @@ docker compose up -d          # Postgres + pgvector 컨테이너
 ./.venv/Scripts/python.exe -m tech_monitoring.filters.stage1_rules      # Stage1 룰 프리필터
 ./.venv/Scripts/python.exe -m tech_monitoring.filters.stage2_relevance  # Stage2 하이브리드 관련도 필터
 
+./.venv/Scripts/python.exe -m tech_monitoring.filters.stage3_importance # Stage3 중요도 스코어
+./.venv/Scripts/python.exe -m tech_monitoring.filters.stage4_rerank     # Stage4 리랭커(상위 후보만)
+./.venv/Scripts/python.exe -m tech_monitoring.filters.stage4_llm_judge  # Stage4 LLM-judge 프롬프트 확인(호출은 안 함)
+
 ./.venv/Scripts/python.exe -m pytest tests/ -q                          # 테스트
 ```
 
@@ -29,6 +33,17 @@ docker compose up -d          # Postgres + pgvector 컨테이너
   τ=0.35는 라벨링 세트로 튜닝 전 임시값 `[확인 필요]` (Day6에서 조정).
 - 필터를 통과하지 못한 기사는 삭제하지 않고 `status='archived'` + `importance_signals.filtered_stage`로 사유를 남김(디버깅·재현 가능성 확보).
 - BGE-M3는 CPU 추론 시 느릴 수 있어 `max_seq_length=512`로 제한(기본 8192는 비현실적으로 느림).
+
+## 중요도·정밀판단 (Day 5 기준)
+
+- **Stage3** (`filters/stage3_importance.py`): source_trust·aggregator_signal·cluster_size·recency·issue_type·sentiment
+  6개 신호의 가중합. 가중치는 균등 플레이스홀더 `[확인 필요]`. issue_type/sentiment는 키워드 휴리스틱(모델 없이 설명 가능).
+  cluster_size는 Stage5(클러스터링, Day6) 이전엔 중립값 사용.
+- **Stage4 리랭커** (`filters/stage4_rerank.py`): importance_score 상위 30건만 `bge-reranker-v2-m3`로 재정렬,
+  `importance_signals.rerank_score`에 저장(비싼 단계는 소수에만 적용하는 퍼널 원칙).
+- **Stage4 LLM-as-judge** (`filters/stage4_llm_judge.py`): 실제 호출 없는 **틀**. 설계상 LLM 판단은 별도 API 과금이 아니라
+  Phase 2 통합 MCP를 통해 팀의 구독형 Claude가 수행하므로, 여기서는 후보 선정 + 프롬프트 조립까지만 구현.
+  회사 관점 중요도 기준(`criteria`)은 담당자 확인 전까지 비워둠 `[확인 필요]`.
 
 Naver 수집은 `.env`에 `NAVER_CLIENT_ID`/`NAVER_CLIENT_SECRET`이 없으면 자동 skip(`[확인 필요]`).
 키워드 기반 수집은 `topics` 테이블의 활성 주제 키워드를 사용 — 현재는 `placeholder-AX`로 메커니즘만 시딩되어 있고, 실제 모니터링 대상/키워드는 담당자 확인 후 교체.
