@@ -75,7 +75,8 @@ def collect_all() -> list[dict]:
             """
             SELECT id, name, source_type, feed_url, source_trust, last_collected_at
             FROM sources
-            WHERE active AND source_type IN ('rss', 'aggregator')
+            WHERE active AND feed_url IS NOT NULL
+              AND source_type IN ('rss', 'aggregator', 'api')
             """
         )
         columns = [c.name for c in cur.description]

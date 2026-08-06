@@ -11,9 +11,14 @@ cp .env.example .env
 docker compose up -d          # Postgres + pgvector 컨테이너
 ./.venv/Scripts/python.exe -m tech_monitoring.db.migrate   # 스키마 적용 + 소스 시딩
 
-./.venv/Scripts/python.exe -m tech_monitoring.collectors.rss   # RSS 수집 실행
-./.venv/Scripts/python.exe -m pytest tests/ -q                 # 테스트
+./.venv/Scripts/python.exe -m tech_monitoring.collectors.rss           # RSS/arXiv(API) 수집
+./.venv/Scripts/python.exe -m tech_monitoring.collectors.keyword_api    # HN Algolia/Naver 키워드 수집
+./.venv/Scripts/python.exe -m tech_monitoring.collectors.extract_content  # trafilatura 본문 백필
+./.venv/Scripts/python.exe -m pytest tests/ -q                          # 테스트
 ```
+
+Naver 수집은 `.env`에 `NAVER_CLIENT_ID`/`NAVER_CLIENT_SECRET`이 없으면 자동 skip(`[확인 필요]`).
+키워드 기반 수집은 `topics` 테이블의 활성 주제 키워드를 사용 — 현재는 `placeholder-AX`로 메커니즘만 시딩되어 있고, 실제 모니터링 대상/키워드는 담당자 확인 후 교체.
 
 ## 소스 현황 (Day 2 기준)
 
