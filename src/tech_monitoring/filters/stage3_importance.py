@@ -1,19 +1,21 @@
 import json
 from datetime import datetime, timezone
 
+from tech_monitoring.config import settings
 from tech_monitoring.db.connection import get_connection
 
-# 가중치 wi — 담당자 "중요도·파급력" 기준 수신 후 확정 [확인 필요]. 지금은 균등 가중 플레이스홀더.
-WEIGHTS = {
-    "source_trust": 0.25,
-    "aggregator_signal": 0.15,
-    "cluster_size": 0.15,
-    "recency": 0.15,
-    "issue_type": 0.15,
-    "sentiment": 0.15,
-}
 
-RECENCY_HALF_LIFE_HOURS = 72  # 최신성 감쇠 반감기 [확인 필요]
+def _weights() -> dict[str, float]:
+    # 가중치 wi — 담당자 "중요도·파급력" 기준 수신 후 확정 [확인 필요]. settings.weight_* 로 파라미터화.
+    return {
+        "source_trust": settings.weight_source_trust,
+        "aggregator_signal": settings.weight_aggregator_signal,
+        "cluster_size": settings.weight_cluster_size,
+        "recency": settings.weight_recency,
+        "issue_type": settings.weight_issue_type,
+        "sentiment": settings.weight_sentiment,
+    }
+
 
 # 파급력 큰 사건 신호(간단 키워드 휴리스틱) — 실사용 전 담당자 기준으로 보강 [확인 필요]
 ISSUE_TYPE_KEYWORDS = (
@@ -41,7 +43,7 @@ def _recency_score(published_at, now) -> float:
     if published_at is None:
         return 0.5  # 발행일 불명 → 중립값
     hours = max((now - published_at).total_seconds() / 3600, 0)
-    return 0.5 ** (hours / RECENCY_HALF_LIFE_HOURS)
+    return 0.5 ** (hours / settings.recency_half_life_hours)
 
 
 def _aggregator_signal_score(source_type: str) -> float:
@@ -59,7 +61,8 @@ def compute_importance(row: dict, now: datetime) -> tuple[float, dict]:
         "issue_type": _issue_type_score(text),
         "sentiment": _sentiment_score(text),
     }
-    score = sum(WEIGHTS[k] * v for k, v in signals.items())
+    weights = _weights()
+    score = sum(weights[k] * v for k, v in signals.items())
     return score, signals
 
 

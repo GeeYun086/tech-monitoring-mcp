@@ -1,8 +1,8 @@
+from tech_monitoring.config import settings
 from tech_monitoring.db.connection import get_connection
 from tech_monitoring.filters.embeddings import embed_texts
 
-# 튜닝 대상 — 담당자 기준 수신 후 라벨링 세트로 확정 [확인 필요] (Day6 PoC 튜닝)
-COSINE_THRESHOLD = 0.35
+# τ(관련도 임계값)는 settings.relevance_cosine_threshold로 파라미터화(.env로 조정 가능) [확인 필요]
 RRF_K = 60
 CANDIDATE_TOP_N = 300
 
@@ -114,7 +114,7 @@ def apply_stage2() -> dict:
                 if article_id in dense_ranks:
                     rank, similarity = dense_ranks[article_id]
                     score += 1 / (RRF_K + rank)
-                    if similarity >= COSINE_THRESHOLD:
+                    if similarity >= settings.relevance_cosine_threshold:
                         methods.add("semantic")
                 fused_scores[article_id] = max(fused_scores.get(article_id, 0.0), score)
 
