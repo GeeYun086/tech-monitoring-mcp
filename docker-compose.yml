@@ -1,0 +1,16 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: tm_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tm_user
+      POSTGRES_PASSWORD: tm_pass
+      POSTGRES_DB: tech_monitoring
+    ports:
+      - "5432:5432"
+    volumes:
+      - tm_pgdata:/var/lib/postgresql/data
+
+volumes:
+  tm_pgdata:
