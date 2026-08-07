@@ -19,7 +19,13 @@ docker compose up -d          # Postgres + pgvector 컨테이너
 
 ## 파이프라인 실행
 
+**한 번에 실행(권장)**: `python -m tech_monitoring.pipeline` — 수집부터 리랭커까지 정해진
+순서로 실행하고, 한 단계가 실패해도 나머지는 계속 진행한 뒤 실패한 단계를 보고한다(Phase 3).
+아래 개별 실행은 특정 단계만 다시 돌리고 싶을 때 쓴다.
+
 ```bash
+./.venv/Scripts/python.exe -m tech_monitoring.pipeline                    # 전체 파이프라인(권장)
+
 ./.venv/Scripts/python.exe -m tech_monitoring.collectors.rss              # RSS/애그리게이터/arXiv 수집
 ./.venv/Scripts/python.exe -m tech_monitoring.collectors.extract_content  # trafilatura 본문 백필
 
@@ -34,6 +40,7 @@ docker compose up -d          # Postgres + pgvector 컨테이너
 ```
 
 > 실행 순서 주의: **Stage5(클러스터링)를 Stage3보다 먼저** 돌려야 `cluster_size`가 파급력 스코어에 반영된다.
+> `tech_monitoring.pipeline`은 이 순서를 코드로 고정해뒀다.
 
 ## 모니터링 MCP
 
@@ -108,6 +115,26 @@ Postgres 컨테이너가 떠 있어야 도구가 응답한다.
 `scripts/tune_relevance_threshold.py`로 τ 민감도 곡선을 확인할 수 있다.
 **실제 정밀도·재현율 측정은 AX 실데이터 라벨링 세트가 있어야 하며 Phase 5 과제**(설계서 v2.0 §11).
 
+### Phase 3 조사 결과 — τ·클러스터 임계값을 지금 올리지/내리지 않은 이유
+
+실사용 검증(주간 다이제스트) 중 "AX와 무관한 기사가 상위에 뜬다"는 문제를 조사했다.
+
+- **근본 원인은 τ가 아니라 본문 누락이었다.** `status='new'` 205건 중 192건이
+  `content IS NULL` — 즉 관련도 판정이 실제 기사 본문이 아니라 "Points: N" 같은
+  RSS 메타데이터만으로 이뤄지고 있었다(HN 계열 피드는 본문을 안 주고,
+  `extract_content` 백필이 오래된 순으로 돌면서 신규 기사에 못 미쳤다).
+  → `collectors/extract_content.py`가 `status='new'`를 우선하도록 수정하고,
+  전체 백필(179/200건 추출 성공) 후 재임베딩·재판정했다.
+- **τ는 올리지 않았다.** 실제 본문으로 재계산해도 관련/무관 기사의 코사인 유사도가
+  0.33~0.51 범위에서 매끈하게 이어져 있어(라벨 없이는) 안전하게 자를 지점이 없다.
+  라벨링 세트 없이 τ를 올리면 무관한 기사와 함께 관련 있는 기사도 잘라낼 위험이 있다.
+- **클러스터 임계값(0.85)도 낮추지 않았다.** 0.60~0.75로 낮춰 봤더니 서로 다른
+  실적 발표·서로 다른 제품 공지가 "같은 이슈"로 잘못 묶였다(뉴스레터·다이제스트류
+  글이 텍스트 구조가 비슷해 임베딩이 가까워짐). 이대로 낮추면 "여러 매체 동시보도"
+  신호 자체가 거짓이 되므로 보류.
+- **다음에 필요한 것**: (1) AX 관련/무관 라벨 세트(담당자 라벨링) → τ 그리드 서치,
+  (2) 클러스터링에 URL 도메인·발행 시각 근접성 등 임베딩 외 신호 추가.
+
 ## 수집 정책
 
 - 소스는 `sources` 테이블 설정으로 관리하고 코드는 하나. RSS·애그리게이터·API(arXiv Atom)를 같은 수집기가 처리.
@@ -146,5 +173,12 @@ db/migrations/  # SQL 마이그레이션 (schema_migrations로 1회만 적용)
 - **Phase 0~1 완료**: 수집 → 필터 → 마스터 DB end-to-end 동작.
 - **Phase 1.5 완료**: 8/6 회의 변경사항(impact 리네이밍·필터 간소화·AX 시장 전체·최신성 로직) 반영.
 - **Phase 2 완료**: 모니터링 MCP(`search_news`·`get_weekly_digest`) + Claude 연결 설정·응답 검증.
-- **다음**: Phase 3 스케줄 센싱(주간 인사이트) → Phase 4 Artifact 대시보드 → Phase 5 튜닝.
+- **Phase 3 진행 중** — ⚠ 실제 진행 순서를 원래 개발계획서와 바꿔서 진행: 원래 Phase 3은
+  스케줄 센싱이고 이 튜닝·안정화 내용은 원래 Phase 5였다. 주간 다이제스트 실사용 검증에서
+  무관한 데이터가 상위에 뜨는 걸 확인해, 무관한 데이터로 주간 인사이트부터 만드는 게
+  무의미하다고 판단해 순서를 바꿨다(단계 내용·문서상 이름은 그대로, 진행 순서만 교체).
+  이번에 한 일: 실사용 검증 중 발견한 데이터 품질 문제(본문 누락) 수정,
+  파이프라인 오케스트레이터(`tech_monitoring.pipeline`)로 순서 고정·실패 격리.
+  τ·클러스터 임계값은 라벨 세트 없이는 안전하게 조정 불가로 판단, 보류(위 "Phase 3 조사 결과" 참고).
+- **다음**: (원래 Phase 5 검증 계속 →) 스케줄 센싱(주간 인사이트, 커밋상 Phase 5) → Artifact 대시보드.
   공개 API 도구(DART·특허 등)는 별도 프로젝트 ②.
