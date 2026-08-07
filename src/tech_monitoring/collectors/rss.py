@@ -7,6 +7,7 @@ import feedparser
 
 from tech_monitoring.config import settings
 from tech_monitoring.db.connection import get_connection
+from tech_monitoring.utils.text import strip_html
 from tech_monitoring.utils.url_normalize import normalize_url
 
 # 일부 사이트는 UA 없는 요청을 봇으로 간주해 403을 반환함 (리서치 문서 "크롤링 여부" 권고 반영)
@@ -57,13 +58,19 @@ def collect_source(conn, source: dict) -> dict:
                 continue
 
             title = entry.get("title", "").strip()
-            summary = entry.get("summary", "") or entry.get("description", "")
+            raw_summary = entry.get("summary", "") or entry.get("description", "")
             url_canonical = normalize_url(link)
 
             signals = {}
-            points = parse_hn_points(summary)
+            # HN points는 원본 HTML의 "<p>Points: N</p>" 패턴에서 뽑으므로 스트립 전에 파싱한다.
+            points = parse_hn_points(raw_summary)
             if points is not None:
                 signals["hn_points"] = points
+
+            # hnrss 등 일부 피드는 description에 <p><a href=...> 형태 HTML을 그대로 담아 보낸다.
+            # keyword_api.py는 이미 strip_html을 쓰는데 이 수집기만 빠져 있었다 —
+            # summary가 그대로 검색 응답에 노출되고, content가 없을 때 임베딩 텍스트로도 쓰인다.
+            summary = strip_html(raw_summary)
 
             cur.execute(
                 """
