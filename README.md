@@ -19,12 +19,19 @@ docker compose up -d          # Postgres + pgvector 컨테이너
 
 ## 파이프라인 실행
 
+**한 번에 실행(권장)**: `python -m tech_monitoring.pipeline` — 수집부터 리랭커까지 정해진
+순서로 실행하고, 한 단계가 실패해도 나머지는 계속 진행한 뒤 실패한 단계를 보고한다(Phase 3).
+아래 개별 실행은 특정 단계만 다시 돌리고 싶을 때 쓴다.
+
 ```bash
+./.venv/Scripts/python.exe -m tech_monitoring.pipeline                    # 전체 파이프라인(권장)
+
 ./.venv/Scripts/python.exe -m tech_monitoring.collectors.rss              # RSS/애그리게이터/arXiv 수집
 ./.venv/Scripts/python.exe -m tech_monitoring.collectors.extract_content  # trafilatura 본문 백필
 
 ./.venv/Scripts/python.exe -m tech_monitoring.filters.stage1_rules        # Stage1 룰 프리필터
 ./.venv/Scripts/python.exe -m tech_monitoring.filters.stage2_relevance    # Stage2 AX 관련도
+./.venv/Scripts/python.exe -m tech_monitoring.filters.stage2b_relevance_rerank  # Stage2b 관련성 참고점수
 ./.venv/Scripts/python.exe -m tech_monitoring.filters.stage5_cluster      # Stage5 이슈 클러스터링
 ./.venv/Scripts/python.exe -m tech_monitoring.filters.stage3_impact       # Stage3 파급력 스코어
 ./.venv/Scripts/python.exe -m tech_monitoring.filters.stage4_rerank       # Stage4 리랭커(상위 30건)
@@ -34,6 +41,7 @@ docker compose up -d          # Postgres + pgvector 컨테이너
 ```
 
 > 실행 순서 주의: **Stage5(클러스터링)를 Stage3보다 먼저** 돌려야 `cluster_size`가 파급력 스코어에 반영된다.
+> `tech_monitoring.pipeline`은 이 순서를 코드로 고정해뒀다.
 
 ## 모니터링 MCP
 
@@ -84,6 +92,10 @@ Postgres 컨테이너가 떠 있어야 도구가 응답한다.
   **키워드 목록이 아니라 `topics.description`의 "AX 시장" 의미 서술과의 유사도로 넓게 판단**(설계서 v2.0 §5).
   `topics.keywords`는 비어 있는 것이 정상이며, 이 경우 BM25 경로는 비고 dense 경로만 동작한다.
   **`topics.description`이 관련도 필터의 의미 기준점 = 가장 중요한 튜닝 노브.**
+- **Stage2b · 관련성 참고 점수** (`filters/stage2b_relevance_rerank.py`): `bge-reranker-v2-m3`로
+  "AX 시장 관련도"를 다시 채점해 `impact_signals.relevance_rerank_score`에 남긴다.
+  **아무것도 archived하지 않는다** — 담당자 방침(라벨·키워드로 관련도를 좁히지 않음)에 따라
+  자동 제외 대신 참고 신호로만 노출한다(모듈 상단 docstring에 조사 배경 상세 기록).
 - **Stage5 · 클러스터링** (`filters/stage5_cluster.py`): 코사인 유사도 기반 그리디 클러스터링으로 동일 이슈를 `cluster_id`로 묶고,
   `impact_signals.cluster_size`(5건 이상 동시보도면 1.0 포화)를 남겨 파급력 신호를 보강.
 - **Stage3 · 파급력** (`filters/stage3_impact.py`): 4개 신호 가중합.
@@ -107,6 +119,46 @@ Postgres 컨테이너가 떠 있어야 도구가 응답한다.
 
 `scripts/tune_relevance_threshold.py`로 τ 민감도 곡선을 확인할 수 있다.
 **실제 정밀도·재현율 측정은 AX 실데이터 라벨링 세트가 있어야 하며 Phase 5 과제**(설계서 v2.0 §11).
+
+### Phase 3 조사 결과 — τ·클러스터 임계값을 지금 올리지/내리지 않은 이유
+
+실사용 검증(주간 다이제스트) 중 "AX와 무관한 기사가 상위에 뜬다"는 문제를 조사했다.
+
+- **근본 원인은 τ가 아니라 본문 누락이었다.** `status='new'` 205건 중 192건이
+  `content IS NULL` — 즉 관련도 판정이 실제 기사 본문이 아니라 "Points: N" 같은
+  RSS 메타데이터만으로 이뤄지고 있었다(HN 계열 피드는 본문을 안 주고,
+  `extract_content` 백필이 오래된 순으로 돌면서 신규 기사에 못 미쳤다).
+  → `collectors/extract_content.py`가 `status='new'`를 우선하도록 수정하고,
+  전체 백필(179/200건 추출 성공) 후 재임베딩·재판정했다.
+- **τ는 올리지 않았다.** 실제 본문으로 재계산해도 관련/무관 기사의 코사인 유사도가
+  0.33~0.51 범위에서 매끈하게 이어져 있어(라벨 없이는) 안전하게 자를 지점이 없다.
+  라벨링 세트 없이 τ를 올리면 무관한 기사와 함께 관련 있는 기사도 잘라낼 위험이 있다.
+- **클러스터 임계값(0.85)도 낮추지 않았다.** 0.60~0.75로 낮춰 봤더니 서로 다른
+  실적 발표·서로 다른 제품 공지가 "같은 이슈"로 잘못 묶였다(뉴스레터·다이제스트류
+  글이 텍스트 구조가 비슷해 임베딩이 가까워짐). 이대로 낮추면 "여러 매체 동시보도"
+  신호 자체가 거짓이 되므로 보류.
+
+**추가 조사 — Techmeme 본문 오염 발견.** 위 조사 도중 리랭커로 관련도를 다시
+매겨봤는데 결과가 이상했다(무관 기사가 1위, 명백히 관련 있는 기사가 최하위).
+원인은 `content` 자체가 잘못 채워져 있었기 때문이었다 — Techmeme URL은
+`techmeme.com/YYMMDD/pXX#aYYMMDDpXX` 형태로 하루치 헤드라인을 모은 리버
+페이지를 #fragment로 가리키는데, trafilatura는 fragment를 못 보고 페이지에서
+아무 블록이나 "본문"으로 골라온다. 실측 결과 Techmeme **15건 전부**가 제목과
+무관한(서로 겹치기도 하는) 본문으로 오염돼 있었다(예: "Nikita Bier 퇴사" 기사에
+"Meta Muse Code 출시" 본문이 들어감). `extract_content.py`가 techmeme.com을
+아예 스킵하도록(summary로 대체) 고치고 오염된 15건을 초기화·재판정했다.
+
+**담당자 방침 반영 (8/7) — 라벨 세트로 좁히지 않는다.** 관련도를 키워드나
+라벨 세트로 좁히면 오히려 AX 시장을 넓게 탐색하려는 목적과 어긋난다는
+방침을 확인했다. 그래서 Techmeme 오염을 고친 뒤 리랭커 재점수가 눈에 띄게
+좋아졌지만(예: "Changes at Google DeepMind..."가 1위로), 이 점수로 기사를
+자동 제외하지는 않는다 — `filters/stage2b_relevance_rerank.py`가
+`impact_signals.relevance_rerank_score`에 **참고 신호로만** 남기고, 여전히
+"Prime Agent"(AI 에이전트 연구) 같은 명백히 관련 있는 기사가 낮게 나오는
+오탐도 있어 하드 컷을 걸 근거가 부족하다.
+- **다음에 필요한 것**: (1) 클러스터링에 URL 도메인·발행 시각 근접성 등
+  임베딩 외 신호 추가, (2) Phase 4 대시보드에서 `relevance_rerank_score`를
+  자동 제외가 아니라 "관련성 참고" 보조 표시로 활용.
 
 ## 수집 정책
 
@@ -146,5 +198,12 @@ db/migrations/  # SQL 마이그레이션 (schema_migrations로 1회만 적용)
 - **Phase 0~1 완료**: 수집 → 필터 → 마스터 DB end-to-end 동작.
 - **Phase 1.5 완료**: 8/6 회의 변경사항(impact 리네이밍·필터 간소화·AX 시장 전체·최신성 로직) 반영.
 - **Phase 2 완료**: 모니터링 MCP(`search_news`·`get_weekly_digest`) + Claude 연결 설정·응답 검증.
-- **다음**: Phase 3 스케줄 센싱(주간 인사이트) → Phase 4 Artifact 대시보드 → Phase 5 튜닝.
+- **Phase 3 진행 중** — ⚠ 실제 진행 순서를 원래 개발계획서와 바꿔서 진행: 원래 Phase 3은
+  스케줄 센싱이고 이 튜닝·안정화 내용은 원래 Phase 5였다. 주간 다이제스트 실사용 검증에서
+  무관한 데이터가 상위에 뜨는 걸 확인해, 무관한 데이터로 주간 인사이트부터 만드는 게
+  무의미하다고 판단해 순서를 바꿨다(단계 내용·문서상 이름은 그대로, 진행 순서만 교체).
+  이번에 한 일: 실사용 검증 중 발견한 데이터 품질 문제(본문 누락) 수정,
+  파이프라인 오케스트레이터(`tech_monitoring.pipeline`)로 순서 고정·실패 격리.
+  τ·클러스터 임계값은 라벨 세트 없이는 안전하게 조정 불가로 판단, 보류(위 "Phase 3 조사 결과" 참고).
+- **다음**: (원래 Phase 5 검증 계속 →) 스케줄 센싱(주간 인사이트, 커밋상 Phase 5) → Artifact 대시보드.
   공개 API 도구(DART·특허 등)는 별도 프로젝트 ②.
