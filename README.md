@@ -35,6 +35,48 @@ docker compose up -d          # Postgres + pgvector 컨테이너
 
 > 실행 순서 주의: **Stage5(클러스터링)를 Stage3보다 먼저** 돌려야 `cluster_size`가 파급력 스코어에 반영된다.
 
+## 모니터링 MCP
+
+마스터 DB를 사내 Claude에 노출하는 stdio MCP 서버(설계서 v2.0 §6).
+**내부 정성 데이터 전용** — DART·특허·금융 등 공개 API는 프로젝트 ②(별도 MCP)다.
+
+| 도구 | 용도 | 주요 인자 |
+| --- | --- | --- |
+| `search_news` | 하이브리드(BM25+BGE-M3) 검색. 질의어를 비우면 파급력 상위 반환 | `query` `since` `until` `min_impact` `limit` |
+| `get_weekly_digest` | 구간 이슈를 `cluster_id`로 묶어 상위 이슈 제공(주간 센싱용) | `period` `limit` `min_impact` |
+
+- 기간 인자는 `7d` · `24h` · `2w` · `2026-08-01` · `2026-08-01..2026-08-07`,
+  `period`는 추가로 `last_week`(기본) · `this_week`를 받는다.
+  `last_week`는 **전주 월~일**로 끊어 스케줄 센싱에 이번 주 진행분이 섞이지 않게 한다.
+- 응답은 Claude 컨텍스트를 고려해 요약 400자 제한·필드 축소로 추리고,
+  파급력 근거(`impact_signals`)를 함께 실어 **판단은 담당자가** 하도록 한다.
+- `status='archived'`(필터 탈락) 기사는 조회되지 않는다.
+- `search_news`의 첫 호출은 BGE-M3 로딩(CPU)으로 수십 초가 걸릴 수 있다. 이후는 캐시된다.
+
+```bash
+./.venv/Scripts/python.exe -m tech_monitoring.mcp_server   # stdio 서버 실행
+./.venv/Scripts/python.exe scripts/smoke_mcp.py            # 도구 목록·질문형 응답 검증
+```
+
+### Claude 연결
+
+- **Claude Code**: 저장소의 `.mcp.json`을 그대로 사용한다(프로젝트 스코프, 상대 경로).
+- **Claude Desktop**: 설정 파일에 같은 내용을 **절대 경로**로 넣는다.
+
+```json
+{
+  "mcpServers": {
+    "tech-monitoring": {
+      "command": "C:\\Users\\<user>\\Desktop\\tech-monitoring-mcp\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "tech_monitoring.mcp_server"]
+    }
+  }
+}
+```
+
+DB 접속 정보는 `.env`(`DATABASE_URL`)에서 읽으므로 MCP 설정에 비밀값을 넣지 않는다.
+Postgres 컨테이너가 떠 있어야 도구가 응답한다.
+
 ## 필터 파이프라인
 
 - **Stage1** (`filters/stage1_rules.py`): 빈 제목·차단 확장자·최소 길이만 값싸게 컷.
@@ -94,12 +136,15 @@ src/tech_monitoring/
   collectors/   # RSS·API 수집기, trafilatura 본문추출
   filters/      # 관련도(Stage1~2)·클러스터링(5)·파급력(3~4) 필터
   db/           # DB 연결·마이그레이션(적용 이력 추적)
-  mcp_server/   # 모니터링 MCP 서버 (Phase 2)
+  mcp_server/   # 모니터링 MCP — server.py(도구 정의) · queries.py(DB 조회 계층)
 db/migrations/  # SQL 마이그레이션 (schema_migrations로 1회만 적용)
+.mcp.json       # Claude Code용 MCP 연결 설정
 ```
 
 ## 진행 현황
 
 - **Phase 0~1 완료**: 수집 → 필터 → 마스터 DB end-to-end 동작.
 - **Phase 1.5 완료**: 8/6 회의 변경사항(impact 리네이밍·필터 간소화·AX 시장 전체·최신성 로직) 반영.
-- **다음**: Phase 2 모니터링 MCP (`search_news`, `get_weekly_digest`). 공개 API 도구는 별도 프로젝트 ②.
+- **Phase 2 완료**: 모니터링 MCP(`search_news`·`get_weekly_digest`) + Claude 연결 설정·응답 검증.
+- **다음**: Phase 3 스케줄 센싱(주간 인사이트) → Phase 4 Artifact 대시보드 → Phase 5 튜닝.
+  공개 API 도구(DART·특허 등)는 별도 프로젝트 ②.
