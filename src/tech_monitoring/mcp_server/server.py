@@ -6,6 +6,7 @@
 
 from fastmcp import FastMCP
 
+from tech_monitoring.filters.embeddings import get_model
 from tech_monitoring.mcp_server import queries
 
 INSTRUCTIONS = """
@@ -21,6 +22,14 @@ impact_score는 '파급력'이지 '우리 회사에 중요한가'가 아니다.
 """.strip()
 
 mcp = FastMCP(name="tech-monitoring", instructions=INSTRUCTIONS)
+
+# search_news의 dense 검색은 BGE-M3를 쓴다. 이 모델을 프로세스 최초 사용 시점에
+# 지연 로딩(get_model()의 lru_cache)하면, 그 첫 로딩이 실제 도구 호출 응답 시간
+# 안에서 일어나 MCP 클라이언트 타임아웃에 걸린다(원인 미확정 — HF Hub 오프라인
+# 모드를 강제해도 재현됨, 첫 호출만 걸리고 이후 호출은 정상). 클라이언트가
+# 응답을 기다리지 않는 서버 기동 시점에 미리 로딩해 도구 호출 경로에서는
+# 항상 "이미 로딩된 모델"만 만나게 한다.
+get_model()
 
 
 @mcp.tool

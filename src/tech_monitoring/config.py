@@ -29,5 +29,13 @@ class Settings(BaseSettings):
     # 2회차부터는 last_collected_at 기준 증분 수집이라 이 값과 무관하다.
     initial_backfill_days: int = 30
 
+    # BGE-M3는 로컬에 캐시돼 있어도 sentence-transformers가 기본적으로 매 프로세스
+    # 첫 로딩 시 HF Hub로 버전 확인 네트워크 요청을 보낸다. 이 요청에 타임아웃이
+    # 없어 네트워크 상태에 따라 응답이 몇 분씩 걸리거나 멈출 수 있고, 실제로 MCP
+    # stdio 호출이 이 때문에 타임아웃났다(검색어 있는 search_news 첫 호출 500s+).
+    # 모델은 이미 로컬에 있으므로 오프라인 모드를 기본값으로 강제한다.
+    # 모델을 새로 받거나 갱신해야 하면 .env에서 false로 잠깐 풀어 받은 뒤 되돌린다.
+    hf_hub_offline: bool = True
+
 
 settings = Settings()
