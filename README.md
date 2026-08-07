@@ -31,6 +31,7 @@ docker compose up -d          # Postgres + pgvector 컨테이너
 
 ./.venv/Scripts/python.exe -m tech_monitoring.filters.stage1_rules        # Stage1 룰 프리필터
 ./.venv/Scripts/python.exe -m tech_monitoring.filters.stage2_relevance    # Stage2 AX 관련도
+./.venv/Scripts/python.exe -m tech_monitoring.filters.stage2b_relevance_rerank  # Stage2b 관련성 참고점수
 ./.venv/Scripts/python.exe -m tech_monitoring.filters.stage5_cluster      # Stage5 이슈 클러스터링
 ./.venv/Scripts/python.exe -m tech_monitoring.filters.stage3_impact       # Stage3 파급력 스코어
 ./.venv/Scripts/python.exe -m tech_monitoring.filters.stage4_rerank       # Stage4 리랭커(상위 30건)
@@ -91,6 +92,10 @@ Postgres 컨테이너가 떠 있어야 도구가 응답한다.
   **키워드 목록이 아니라 `topics.description`의 "AX 시장" 의미 서술과의 유사도로 넓게 판단**(설계서 v2.0 §5).
   `topics.keywords`는 비어 있는 것이 정상이며, 이 경우 BM25 경로는 비고 dense 경로만 동작한다.
   **`topics.description`이 관련도 필터의 의미 기준점 = 가장 중요한 튜닝 노브.**
+- **Stage2b · 관련성 참고 점수** (`filters/stage2b_relevance_rerank.py`): `bge-reranker-v2-m3`로
+  "AX 시장 관련도"를 다시 채점해 `impact_signals.relevance_rerank_score`에 남긴다.
+  **아무것도 archived하지 않는다** — 담당자 방침(라벨·키워드로 관련도를 좁히지 않음)에 따라
+  자동 제외 대신 참고 신호로만 노출한다(모듈 상단 docstring에 조사 배경 상세 기록).
 - **Stage5 · 클러스터링** (`filters/stage5_cluster.py`): 코사인 유사도 기반 그리디 클러스터링으로 동일 이슈를 `cluster_id`로 묶고,
   `impact_signals.cluster_size`(5건 이상 동시보도면 1.0 포화)를 남겨 파급력 신호를 보강.
 - **Stage3 · 파급력** (`filters/stage3_impact.py`): 4개 신호 가중합.
@@ -132,8 +137,28 @@ Postgres 컨테이너가 떠 있어야 도구가 응답한다.
   실적 발표·서로 다른 제품 공지가 "같은 이슈"로 잘못 묶였다(뉴스레터·다이제스트류
   글이 텍스트 구조가 비슷해 임베딩이 가까워짐). 이대로 낮추면 "여러 매체 동시보도"
   신호 자체가 거짓이 되므로 보류.
-- **다음에 필요한 것**: (1) AX 관련/무관 라벨 세트(담당자 라벨링) → τ 그리드 서치,
-  (2) 클러스터링에 URL 도메인·발행 시각 근접성 등 임베딩 외 신호 추가.
+
+**추가 조사 — Techmeme 본문 오염 발견.** 위 조사 도중 리랭커로 관련도를 다시
+매겨봤는데 결과가 이상했다(무관 기사가 1위, 명백히 관련 있는 기사가 최하위).
+원인은 `content` 자체가 잘못 채워져 있었기 때문이었다 — Techmeme URL은
+`techmeme.com/YYMMDD/pXX#aYYMMDDpXX` 형태로 하루치 헤드라인을 모은 리버
+페이지를 #fragment로 가리키는데, trafilatura는 fragment를 못 보고 페이지에서
+아무 블록이나 "본문"으로 골라온다. 실측 결과 Techmeme **15건 전부**가 제목과
+무관한(서로 겹치기도 하는) 본문으로 오염돼 있었다(예: "Nikita Bier 퇴사" 기사에
+"Meta Muse Code 출시" 본문이 들어감). `extract_content.py`가 techmeme.com을
+아예 스킵하도록(summary로 대체) 고치고 오염된 15건을 초기화·재판정했다.
+
+**담당자 방침 반영 (8/7) — 라벨 세트로 좁히지 않는다.** 관련도를 키워드나
+라벨 세트로 좁히면 오히려 AX 시장을 넓게 탐색하려는 목적과 어긋난다는
+방침을 확인했다. 그래서 Techmeme 오염을 고친 뒤 리랭커 재점수가 눈에 띄게
+좋아졌지만(예: "Changes at Google DeepMind..."가 1위로), 이 점수로 기사를
+자동 제외하지는 않는다 — `filters/stage2b_relevance_rerank.py`가
+`impact_signals.relevance_rerank_score`에 **참고 신호로만** 남기고, 여전히
+"Prime Agent"(AI 에이전트 연구) 같은 명백히 관련 있는 기사가 낮게 나오는
+오탐도 있어 하드 컷을 걸 근거가 부족하다.
+- **다음에 필요한 것**: (1) 클러스터링에 URL 도메인·발행 시각 근접성 등
+  임베딩 외 신호 추가, (2) Phase 4 대시보드에서 `relevance_rerank_score`를
+  자동 제외가 아니라 "관련성 참고" 보조 표시로 활용.
 
 ## 수집 정책
 

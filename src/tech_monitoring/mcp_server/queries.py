@@ -35,6 +35,9 @@ _EXPOSED_SIGNALS = (
     "hn_points",
     "cluster_member_count",
     "rerank_score",
+    # Stage2b 참고 신호 — 관련도를 자동으로 걸러내는 데는 안 쓴다(stage2b 모듈 설명 참고).
+    # 절대값이 극히 작게 압축돼 있어(0.0000~0.01대) 컷오프가 아니라 상대 비교 참고용.
+    "relevance_rerank_score",
 )
 
 RANKING_BASIS = (

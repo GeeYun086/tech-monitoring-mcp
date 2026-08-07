@@ -8,8 +8,11 @@
 생긴다 — 이 모듈은 정해진 순서를 코드로 고정해 그 위험을 없앤다.
 
 순서 고정 이유(README와 동일):
-    수집 → 본문 백필 → Stage1 → Stage2(관련도) → Stage5(클러스터링) → Stage3(파급력) → Stage4(리랭커)
+    수집 → 본문 백필 → Stage1 → Stage2(관련도) → Stage2b(관련성 참고점수)
+        → Stage5(클러스터링) → Stage3(파급력) → Stage4(리랭커)
     Stage5가 Stage3보다 먼저 와야 cluster_size가 파급력 스코어에 반영된다.
+    Stage2b는 아무것도 archived하지 않는다 — relevance_rerank_score를
+    참고용으로만 남긴다(stage2b_relevance_rerank.py 상단 설명 참고).
 
 한 단계가 실패해도(네트워크 오류 등) 나머지 단계는 계속 진행하고,
 실패한 단계는 report의 "failed"에 남겨 무엇이 왜 실패했는지 알 수 있게 한다
@@ -23,6 +26,7 @@ from tech_monitoring.collectors.extract_content import backfill_content
 from tech_monitoring.collectors.rss import collect_all
 from tech_monitoring.filters.stage1_rules import apply_stage1
 from tech_monitoring.filters.stage2_relevance import apply_stage2
+from tech_monitoring.filters.stage2b_relevance_rerank import apply_stage2b
 from tech_monitoring.filters.stage3_impact import apply_stage3
 from tech_monitoring.filters.stage4_rerank import rerank_top_candidates
 from tech_monitoring.filters.stage5_cluster import apply_stage5
@@ -37,6 +41,7 @@ def _stages() -> list[tuple[str, object]]:
         ("extract_content", backfill_content),
         ("stage1_rules", apply_stage1),
         ("stage2_relevance", apply_stage2),
+        ("stage2b_relevance_rerank", apply_stage2b),
         ("stage5_cluster", apply_stage5),
         ("stage3_impact", apply_stage3),
         ("stage4_rerank", rerank_top_candidates),

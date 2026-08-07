@@ -17,6 +17,7 @@ def _patch_all_stages(monkeypatch, calls, fail_at=None):
     monkeypatch.setattr(pipeline, "backfill_content", make_stage("extract_content"))
     monkeypatch.setattr(pipeline, "apply_stage1", make_stage("stage1_rules"))
     monkeypatch.setattr(pipeline, "apply_stage2", make_stage("stage2_relevance"))
+    monkeypatch.setattr(pipeline, "apply_stage2b", make_stage("stage2b_relevance_rerank"))
     monkeypatch.setattr(pipeline, "apply_stage5", make_stage("stage5_cluster"))
     monkeypatch.setattr(pipeline, "apply_stage3", make_stage("stage3_impact"))
     monkeypatch.setattr(pipeline, "rerank_top_candidates", make_stage("stage4_rerank"))
@@ -35,6 +36,7 @@ def test_runs_stages_in_fixed_order(monkeypatch):
         "extract_content",
         "stage1_rules",
         "stage2_relevance",
+        "stage2b_relevance_rerank",
         "stage5_cluster",
         "stage3_impact",
         "stage4_rerank",
@@ -55,6 +57,7 @@ def test_one_stage_failing_does_not_stop_the_rest(monkeypatch):
         "extract_content",
         "stage1_rules",
         "stage2_relevance",
+        "stage2b_relevance_rerank",
         "stage5_cluster",
         "stage3_impact",
         "stage4_rerank",
