@@ -172,13 +172,29 @@ Postgres 컨테이너가 떠 있어야 도구가 응답한다.
 
 ## 소스 현황
 
-활성: Techmeme · HN(points≥100) · Stratechery · Import AI · TLDR AI(큐레이션·애그리게이터) /
-arXiv cs.AI(논문) / The Verge · TechCrunch · Ars Technica · MIT Tech Review · OpenAI(글로벌).
+활성(글로벌): Techmeme · HN(points≥100, 신뢰도 0.5로 하향 — 아래 참고) · Stratechery · Import AI ·
+TLDR AI(큐레이션·애그리게이터) / arXiv cs.AI(논문) / The Verge · TechCrunch · Ars Technica ·
+MIT Tech Review · OpenAI(글로벌).
+
+활성(국내, 2026-08-10 추가): 전자신문 AI·SW 섹션 · 바이라인네트워크 · ZDNet Korea ·
+GeekNews(신뢰도 0.5 — HN과 같은 이유, 아래 참고).
+
+**HN·GeekNews는 신뢰도를 낮게(0.5) 잡았다.** 둘 다 "편집 큐레이션 매체"가 아니라
+"인기 있으면 뭐든 올라오는 커뮤니티"라, AX·사업과 무관한 개인 블로그·프로젝트 글이
+섞인다(실사용 중 발견 — 주간 다이제스트 상위 15건 중 10건이 HN이었고 다수가 무관한
+글이었음). 완전히 빼지는 않되 비중만 줄였다.
+
+**전자신문·GeekNews는 "일부러 뺐던 게" 아니라 기술적으로 막혀서 결과적으로 국내 소스가
+0개였다** — 담당자 지적으로 재검증해서 살렸다:
+- 전자신문: 등록 주소(`www.etnews.com/rss/`)가 RSS가 아니라 HTML 안내 페이지였다.
+  실제 섹션 피드(`rss.etnews.com/04.xml`, AI·SW)로 교체.
+- GeekNews: 예전엔 403(nginx 차단)이었는데 같은 URL·UA로 재시도하니 지금은 안 막혀
+  있다(원인 불명 — 일시적 차단으로 추정, 다시 막힐 수 있음).
 
 비활성:
-- 전자신문 `/rss/`가 HTML 반환, a16z `/feed/` 404, GeekNews 403(nginx 차단) — 피드가 깨짐
+- a16z `/feed/` 404 — 피드 자체가 깨짐
 - Hacker News (Algolia) · Naver News — **키워드 검색 기반**이라 "키워드 미지정" 방침에서 질의어가 없어 동작 불가.
-  HN은 hnrss 애그리게이터 피드가 대체하며, Naver는 "국내 한정하지 않음" 기조상 보류.
+  RSS 기반 국내 소스(위)로 그 역할을 대체했다.
   `keyword_api.py` 모듈 자체는 남겨두어, `topics.keywords`를 채우면 다시 동작한다.
 
 ## 프로젝트 구조
