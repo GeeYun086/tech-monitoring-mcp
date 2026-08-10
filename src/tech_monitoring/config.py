@@ -11,7 +11,13 @@ class Settings(BaseSettings):
     # 필터 튜닝 파라미터 — AX 실데이터 라벨링으로 정밀도 측정 후 조정(설계서 v2.0 §11)
     relevance_cosine_threshold: float = 0.35  # Stage2 τ (AX 시장 관련도)
     cluster_similarity_threshold: float = 0.85  # Stage5 이슈 클러스터링 임계값
-    recency_half_life_hours: float = 72  # 최신성 감쇠 반감기
+    # 최신성 감쇠 반감기. 2026-08-10: 다이제스트 스케일(1주)에 맞춰 72h→168h로
+    # 완화했다. 단, 이것만으로는 "주간 다이제스트가 마지막 하루로 쏠리는" 문제가
+    # 안 풀렸다 — aggregator_signal(속도 기반)이 나이에 훨씬 더 민감하게 떨어져서
+    # recency를 느긋하게 해도 눌린다. 그 문제의 실제 해결책은
+    # mcp_server/queries.py의 diversify_by_day()(날짜별 라운드로빈)다. 이 값은
+    # "다이제스트 스케일에 맞춘 상식적인 기본값" 정도로 남겨둔다.
+    recency_half_life_hours: float = 168  # 7일
 
     # 파급력 가중치 — 설계서 v2.0 §5: 큐레이션 소스 중심 + 규칙 신호 + 최신성.
     # 감성 분석·회사관점 LLM 중요도 판정은 미도입(주관 중요도는 사용자 판단 영역).
