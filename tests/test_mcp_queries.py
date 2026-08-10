@@ -4,6 +4,7 @@ import pytest
 
 from tech_monitoring.mcp_server.queries import (
     build_clusters,
+    diversify_by_day,
     parse_since,
     resolve_period,
     rrf_fuse,
@@ -101,7 +102,7 @@ def test_summary_is_clipped():
     assert len(to_article(row)["summary"]) <= 401  # 말줄임표 1자 포함
 
 
-def _row(article_id: int, cluster_id: str | None, impact: float) -> dict:
+def _row(article_id: int, cluster_id: str | None, impact: float, published_at=None) -> dict:
     return {
         "id": article_id,
         "title": f"기사 {article_id}",
@@ -110,8 +111,47 @@ def _row(article_id: int, cluster_id: str | None, impact: float) -> dict:
         "source_type": "aggregator",
         "impact_score": impact,
         "cluster_id": cluster_id,
+        "published_at": published_at,
         "impact_signals": {},
     }
+
+
+def _cluster(article_id: int, day: str, impact: float) -> dict:
+    """diversify_by_day 테스트용 — build_clusters를 거친 최종 형태를 바로 만든다."""
+    published = datetime.fromisoformat(f"{day}T00:00:00+00:00")
+    return build_clusters([_row(article_id, None, impact, published)])[0]
+
+
+def test_diversify_by_day_round_robins_across_days():
+    """실사용 중 발견(2026-08-10): aggregator_signal이 속도 기반이라 나이에
+    민감해서, 파급력 순으로만 정렬하면 주간 다이제스트가 가장 최근 하루로
+    통째로 쏠렸다(15건 중 14건이 같은 날). 날짜별로 번갈아 채워야 한다."""
+    clusters = [
+        _cluster(1, "2026-08-09", 0.9),
+        _cluster(2, "2026-08-09", 0.8),
+        _cluster(3, "2026-08-09", 0.7),
+        _cluster(4, "2026-08-06", 0.6),
+    ]
+    result = diversify_by_day(clusters)
+    days = [c["lead"]["published_at"][:10] for c in result]
+    # 첫 라운드에 날짜당 하나씩 — 08-09가 다 먼저 나오고 그 뒤에 08-06이 오면 안 됨
+    assert days[:2] == ["2026-08-09", "2026-08-06"]
+    assert len(result) == len(clusters)
+
+
+def test_diversify_by_day_preserves_impact_order_within_a_day():
+    clusters = [_cluster(1, "2026-08-09", 0.9), _cluster(2, "2026-08-09", 0.5)]
+    result = diversify_by_day(clusters)
+    assert [c["lead"]["id"] for c in result] == [1, 2]
+
+
+def test_diversify_by_day_handles_single_day():
+    clusters = [_cluster(1, "2026-08-09", 0.9), _cluster(2, "2026-08-09", 0.5)]
+    assert diversify_by_day(clusters) == clusters
+
+
+def test_diversify_by_day_handles_empty_list():
+    assert diversify_by_day([]) == []
 
 
 def test_clusters_group_same_issue_and_keep_highest_as_lead():

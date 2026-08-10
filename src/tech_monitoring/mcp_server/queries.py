@@ -292,7 +292,7 @@ def get_weekly_digest(
     finally:
         conn.close()
 
-    clusters = build_clusters(rows)
+    clusters = diversify_by_day(build_clusters(rows))
     return {
         "period": {"label": label, "start": _iso(start), "end": _iso(end)},
         "total_articles": len(rows),
@@ -334,3 +334,37 @@ def build_clusters(rows: list[dict]) -> list[dict]:
             }
         )
     return clusters
+
+
+def diversify_by_day(clusters: list[dict]) -> list[dict]:
+    """파급력 순으로 정렬된 클러스터를 발행일별로 라운드로빈해 날짜 쏠림을 없앤다.
+
+    2026-08-10 실사용 중 발견: aggregator_signal이 속도(시간당 반응) 기반이라
+    나이에 훨씬 민감하게 떨어진다 — recency 반감기를 아무리 느긋하게 잡아도
+    이걸 못 이겨서, 1주일치를 봐야 하는 주간 다이제스트가 그 주 마지막 하루로
+    통째로 쏠렸다(15건 중 14건이 같은 날). impact_score 자체는 실시간 검색에도
+    쓰이므로 더 손대지 않고, "1주일을 고르게 보여준다"는 다이제스트 고유의
+    요구사항은 여기서 후처리로 해결한다.
+
+    각 날짜 내부의 파급력 순서는 그대로 유지하고, 날짜 간에는 번갈아가며 채운다
+    (첫 라운드에 가장 높은 날짜부터 하나씩 → 그 날짜의 다음 것 → ...).
+    """
+    by_day: dict[str, list[dict]] = {}
+    day_order: list[str] = []
+    for cluster in clusters:
+        day = (cluster["lead"].get("published_at") or "")[:10]
+        if day not in by_day:
+            by_day[day] = []
+            day_order.append(day)
+        by_day[day].append(cluster)
+
+    result = []
+    while len(result) < len(clusters):
+        progressed = False
+        for day in day_order:
+            if by_day[day]:
+                result.append(by_day[day].pop(0))
+                progressed = True
+        if not progressed:
+            break
+    return result
