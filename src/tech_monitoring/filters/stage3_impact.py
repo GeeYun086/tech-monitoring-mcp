@@ -32,19 +32,31 @@ def _recency_score(published_at, now) -> float:
     return 0.5 ** (hours / settings.recency_half_life_hours)
 
 
-def _aggregator_signal_score(signals: dict) -> float:
-    """HN points 등 실제 반향 수치. 수치가 없는 소스는 0(파급력 근거 없음)."""
+def _aggregator_signal_score(signals: dict, published_at, now: datetime) -> float:
+    """HN points 등 실제 반향 수치를 "속도"(경과 시간당 포인트)로 정규화한다.
+
+    2026-08-10 실사용 중 발견: 단순 누적 포인트(점수/hn_points_saturation)만
+    보면, 반응이 쌓일 시간이 아직 없었던 신생 기사가 구조적으로 불리했다 —
+    30분 전 15점(빠르게 뜨는 중일 수 있음) vs 72시간 전 400점(이미 다 모임)을
+    비교하면 최신성 감쇠(반감기 72h)가 느긋해서 후자가 항상 이겼다. 시간당
+    속도로 보면 "얼마나 빠르게 반응을 얻고 있는가"를 보게 되어 이 편향이 준다.
+    """
     points = (signals or {}).get("hn_points")
     if points is None:
         return 0.0
-    return min(float(points) / settings.hn_points_saturation, 1.0)
+    if published_at is None:
+        # 발행일 불명 시 나이를 알 수 없어 속도 계산이 불가능 — 원점수 기준으로 폴백
+        return min(float(points) / settings.hn_points_saturation, 1.0)
+    age_hours = max((now - published_at).total_seconds() / 3600, 0)
+    velocity = float(points) / (age_hours + settings.aggregator_velocity_offset_hours)
+    return min(velocity / settings.aggregator_velocity_saturation, 1.0)
 
 
 def compute_impact(row: dict, now: datetime) -> tuple[float, dict]:
     existing = row.get("impact_signals") or {}
     signals = {
         "source_trust": row["source_trust"] or 0.0,
-        "aggregator_signal": _aggregator_signal_score(existing),
+        "aggregator_signal": _aggregator_signal_score(existing, row["published_at"], now),
         # Stage5 클러스터링 전에는 중립값(단독 보도 = 1건)
         "cluster_size": existing.get("cluster_size", 1.0 / CLUSTER_SIZE_SATURATION),
         "recency": _recency_score(row["published_at"], now),
