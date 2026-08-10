@@ -8,11 +8,15 @@
 생긴다 — 이 모듈은 정해진 순서를 코드로 고정해 그 위험을 없앤다.
 
 순서 고정 이유(README와 동일):
-    수집 → 본문 백필 → Stage1 → Stage2(관련도) → Stage2b(관련성 참고점수)
-        → Stage5(클러스터링) → Stage3(파급력) → Stage4(리랭커)
+    수집(RSS + GeekNews Weekly 스크래핑) → 본문 백필 → Stage1 →
+        Stage2(관련도) → Stage2b(관련성 참고점수) → Stage5(클러스터링) →
+        Stage3(파급력) → Stage4(리랭커)
     Stage5가 Stage3보다 먼저 와야 cluster_size가 파급력 스코어에 반영된다.
     Stage2b는 아무것도 archived하지 않는다 — relevance_rerank_score를
     참고용으로만 남긴다(stage2b_relevance_rerank.py 상단 설명 참고).
+    GeekNews Weekly는 RSS가 아니라 스크래핑이라 collect_all()의 일반
+    루프(source_type이 rss/aggregator/api인 것만 대상)에 안 걸린다
+    (source_type='crawl') — 그래서 별도 단계로 호출한다.
 
 한 단계가 실패해도(네트워크 오류 등) 나머지 단계는 계속 진행하고,
 실패한 단계는 report의 "failed"에 남겨 무엇이 왜 실패했는지 알 수 있게 한다
@@ -23,7 +27,9 @@ import logging
 import time
 
 from tech_monitoring.collectors.extract_content import backfill_content
+from tech_monitoring.collectors.geeknews_weekly import collect_geeknews_weekly
 from tech_monitoring.collectors.rss import collect_all
+from tech_monitoring.db.connection import get_connection
 from tech_monitoring.filters.stage1_rules import apply_stage1
 from tech_monitoring.filters.stage2_relevance import apply_stage2
 from tech_monitoring.filters.stage2b_relevance_rerank import apply_stage2b
@@ -34,10 +40,21 @@ from tech_monitoring.filters.stage5_cluster import apply_stage5
 logger = logging.getLogger("tech_monitoring.pipeline")
 
 
+def _collect_geeknews_weekly() -> dict:
+    # collect_geeknews_weekly는 다른 소스별 수집기(예: Naver)처럼 커넥션을
+    # 인자로 받는 형태라 여기서 열고 닫아준다(rss.collect_all은 자체 관리).
+    conn = get_connection()
+    try:
+        return collect_geeknews_weekly(conn)
+    finally:
+        conn.close()
+
+
 def _stages() -> list[tuple[str, object]]:
     # 매 호출 시점의 모듈 전역을 참조 — 테스트에서 monkeypatch로 각 단계를 갈아끼울 수 있게 한다.
     return [
         ("collect", lambda: {"sources": collect_all()}),
+        ("collect_geeknews_weekly", _collect_geeknews_weekly),
         ("extract_content", backfill_content),
         ("stage1_rules", apply_stage1),
         ("stage2_relevance", apply_stage2),

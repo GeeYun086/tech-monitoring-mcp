@@ -14,6 +14,7 @@ def _patch_all_stages(monkeypatch, calls, fail_at=None):
         return stage
 
     monkeypatch.setattr(pipeline, "collect_all", make_stage("collect"))
+    monkeypatch.setattr(pipeline, "_collect_geeknews_weekly", make_stage("collect_geeknews_weekly"))
     monkeypatch.setattr(pipeline, "backfill_content", make_stage("extract_content"))
     monkeypatch.setattr(pipeline, "apply_stage1", make_stage("stage1_rules"))
     monkeypatch.setattr(pipeline, "apply_stage2", make_stage("stage2_relevance"))
@@ -33,6 +34,7 @@ def test_runs_stages_in_fixed_order(monkeypatch):
 
     assert calls == [
         "collect",
+        "collect_geeknews_weekly",
         "extract_content",
         "stage1_rules",
         "stage2_relevance",
@@ -54,6 +56,7 @@ def test_one_stage_failing_does_not_stop_the_rest(monkeypatch):
 
     assert calls == [
         "collect",
+        "collect_geeknews_weekly",
         "extract_content",
         "stage1_rules",
         "stage2_relevance",
