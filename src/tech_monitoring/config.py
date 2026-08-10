@@ -20,8 +20,18 @@ class Settings(BaseSettings):
     weight_cluster_size: float = 0.20
     weight_recency: float = 0.20
 
-    # HN points가 이 값 이상이면 애그리게이터 반향 신호를 1.0으로 포화
+    # HN points가 이 값 이상이면 애그리게이터 반향 신호를 1.0으로 포화.
+    # published_at을 몰라 속도 계산이 불가능할 때만 폴백으로 쓰인다(아래 참고).
     hn_points_saturation: float = 500
+
+    # aggregator_signal 속도 정규화 — 2026-08-10 실사용 중 발견: 누적 포인트를
+    # 그대로 쓰면(점수/500) 반응이 쌓일 시간이 없었던 신생 기사가 구조적으로
+    # 불리했다. 예: 30분 전 15점(막 뜨는 중) vs 72시간 전 400점(이미 다 모임) —
+    # 후자가 항상 이겼다. "누적량"이 아니라 "시간당 속도"로 보면 이 편향이 준다.
+    # offset은 나이가 0에 가까울 때 속도가 무한대로 튀는 걸 막는 버퍼(시간),
+    # saturation은 "이 정도 속도면 충분히 빠르다"는 상한(포인트/시간).
+    aggregator_velocity_offset_hours: float = 2.0
+    aggregator_velocity_saturation: float = 20.0
 
     # 소스 최초 수집 시 가져올 최대 소급 기간(일).
     # 일부 피드(OpenAI 등)는 전체 아카이브를 한 번에 내려주는데, 수년치 과거 글이
