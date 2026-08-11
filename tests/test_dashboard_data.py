@@ -4,8 +4,15 @@ from tech_monitoring.config import settings
 from scripts.dashboard_data import (
     classify_region,
     compute_breakdown_pct,
+    compute_co_report_intensity,
+    compute_cross_region_lag,
+    compute_entity_ranking,
     compute_impact_distribution,
+    compute_keyword_bubbles,
     compute_keyword_cloud,
+    compute_keyword_gap,
+    compute_keyword_network,
+    compute_rising_keywords,
     compute_source_distribution,
     compute_volume_trend,
     extract_keywords,
@@ -105,7 +112,7 @@ def test_classify_region_uses_registered_domestic_source_list():
     assert classify_region("어쩌다 이름이 비슷한 소스") == "global"  # 등록 안 된 이름은 기본 해외
 
 
-def _article(source, days_ago, impact_score=0.5, title="", summary="", now=None):
+def _article(source, days_ago, impact_score=0.5, title="", summary="", now=None, cluster_id=None):
     now = now or datetime(2026, 8, 11, tzinfo=timezone.utc)
     return {
         "source": source,
@@ -113,6 +120,7 @@ def _article(source, days_ago, impact_score=0.5, title="", summary="", now=None)
         "impact_score": impact_score,
         "title": title,
         "summary": summary,
+        "cluster_id": cluster_id,
     }
 
 
@@ -191,3 +199,130 @@ def test_keyword_cloud_filters_by_region():
     domestic_kw = {k["word"] for k in compute_keyword_cloud(articles, "domestic")}
     assert "OpenAI" in global_kw and "삼성전자" not in global_kw
     assert "삼성전자" in domestic_kw and "OpenAI" not in domestic_kw
+
+
+# ---- 2026-08-11 2차 확장: 담당자 피드백 — "수집 방법 지표"가 아니라
+# "산업 동향 지표"가 필요하다. 새 백엔드(감성분석·NER)가 필요한 지표는
+# 미루고, 지금 데이터로 계산 가능한 7개를 추가.
+
+
+def test_keyword_network_links_words_that_co_occur_in_same_article():
+    articles = [
+        _article("TechCrunch", 0, title="OpenAI agent platform launch"),
+        _article("TechCrunch", 0, title="OpenAI agent platform update"),
+        _article("The Verge", 0, title="Totally unrelated gadget review"),
+    ]
+    network = compute_keyword_network(articles, top_nodes=10, min_weight=2)
+    edge_pairs = {(e["source"], e["target"]) for e in network["edges"]}
+    assert ("OpenAI", "agent") in edge_pairs or ("agent", "OpenAI") in edge_pairs
+
+
+def test_keyword_network_drops_edges_below_min_weight():
+    articles = [
+        _article("TechCrunch", 0, title="OpenAI agent launch"),
+        _article("The Verge", 0, title="Totally different gadget story"),
+    ]
+    network = compute_keyword_network(articles, top_nodes=10, min_weight=2)
+    assert network["edges"] == []  # 동시출현이 1번뿐이면 노이즈로 제외
+
+
+def test_rising_keywords_ranks_by_absolute_delta_not_percent():
+    """1건→3건(200%)보다 5건→10건(100%, delta 5)이 더 위에 와야 한다 —
+    표본이 작은 단어가 퍼센트로 과장되는 걸 막기 위해 delta를 1차 기준으로 쓴다."""
+    current = [_article("TechCrunch", 0, title="alpha topic here")] * 3 + \
+              [_article("TechCrunch", 0, title="beta subject matter")] * 10
+    previous = [_article("TechCrunch", 7, title="alpha topic here")] * 1 + \
+               [_article("TechCrunch", 7, title="beta subject matter")] * 5
+    rows = compute_rising_keywords(current, previous, top_n=5)
+    words_in_order = [r["word"] for r in rows]
+    assert words_in_order.index("beta") < words_in_order.index("alpha")
+
+
+def test_rising_keywords_excludes_flat_or_declining_words():
+    current = [_article("TechCrunch", 0, title="steady term")] * 3
+    previous = [_article("TechCrunch", 7, title="steady term")] * 5
+    rows = compute_rising_keywords(current, previous)
+    assert "steady" not in {r["word"] for r in rows}
+
+
+def test_keyword_bubbles_marks_brand_new_words_and_counts_sources():
+    current = [
+        _article("TechCrunch", 0, title="novelword appears here"),
+        _article("The Verge", 0, title="novelword shows up too"),
+    ]
+    previous = []
+    bubbles = compute_keyword_bubbles(current, previous)
+    row = next(b for b in bubbles if b["word"] == "novelword")
+    assert row["is_new"] is True
+    assert row["source_count"] == 2  # TechCrunch·The Verge 두 소스에서 나옴
+
+
+def test_keyword_gap_finds_words_unique_to_one_region():
+    articles = [_article("TechCrunch", 0, title="quantum computing breakthrough")] * 5 + \
+               [_article("AI타임스", 0, title="양자컴퓨팅 관련 없는 국내 기사")] * 5
+    gap = compute_keyword_gap(articles)
+    global_words = {r["word"] for r in gap["global_only"]}
+    assert "quantum" in global_words
+
+
+def test_keyword_gap_ignores_korean_english_translation_pairs():
+    """실사용 중 발견: 영문 제한이 없으면 "모델"(국내만)과 "model"(해외만)이
+    같은 개념인데 서로 다른 문자열이라 "격차"로 잘못 잡혔다 — 이건 화제
+    격차가 아니라 언어 차이일 뿐이다. 한글 토큰은 애초에 후보에서 빠져야 한다."""
+    articles = [_article("TechCrunch", 0, title="the model performs well")] * 5 + \
+               [_article("AI타임스", 0, title="모델 성능이 우수하다")] * 5
+    gap = compute_keyword_gap(articles)
+    domestic_words = {r["word"] for r in gap["domestic_only"]}
+    assert "모델" not in domestic_words
+
+
+def test_entity_ranking_reuses_distinctive_tokens_and_skips_korean_titles():
+    articles = [
+        _article("TechCrunch", 0, title="OpenAI announces new agent tools"),
+        _article("TechCrunch", 0, title="OpenAI expands agent tools further"),
+        _article("AI타임스", 0, title="삼성전자 AI 반도체 신제품 공개"),
+    ]
+    ranking = compute_entity_ranking(articles)
+    entities = {r["entity"]: r["count"] for r in ranking}
+    assert entities.get("OpenAI") == 2
+    assert "삼성전자" not in entities  # 알려진 한계 — 영문 대문자 표기 기반이라 한글엔 미적용
+
+
+def test_cross_region_lag_only_counts_domestic_following_global():
+    now = datetime(2026, 8, 11, tzinfo=timezone.utc)
+    articles = [
+        _article("TechCrunch", days_ago=3, now=now, cluster_id="cluster-1"),  # 해외가 먼저
+        _article("AI타임스", days_ago=1, now=now, cluster_id="cluster-1"),     # 국내가 2일 뒤 후속
+        _article("OpenAI", days_ago=2, now=now, cluster_id="cluster-2"),      # 해외 단독(짝 없음)
+    ]
+    result = compute_cross_region_lag(articles)
+    assert result["count"] == 1
+    assert result["pairs"][0]["lag_hours"] == 48.0
+
+
+def test_cross_region_lag_excludes_domestic_first_cases():
+    now = datetime(2026, 8, 11, tzinfo=timezone.utc)
+    articles = [
+        _article("AI타임스", days_ago=3, now=now, cluster_id="cluster-1"),   # 국내가 먼저
+        _article("TechCrunch", days_ago=1, now=now, cluster_id="cluster-1"),  # 해외가 뒤늦게 후속
+    ]
+    result = compute_cross_region_lag(articles)
+    assert result["count"] == 0  # "추격 시차"의 정의(해외→국내) 밖
+
+
+def test_co_report_intensity_requires_at_least_three_members():
+    now = datetime(2026, 8, 11, tzinfo=timezone.utc)
+    articles = (
+        [_article("TechCrunch", days_ago=1, now=now, cluster_id="big")] * 3
+        + [_article("The Verge", days_ago=2, now=now, cluster_id="small")] * 2
+    )
+    result = compute_co_report_intensity(articles, days=3, now=now)
+    total = sum(r["big_cluster_count"] for r in result)
+    assert total == 1  # "big" 클러스터가 걸린 날만 1로 잡히고 "small"은 안 잡힘
+
+
+def test_co_report_intensity_fills_empty_days_with_zero():
+    now = datetime(2026, 8, 11, tzinfo=timezone.utc)
+    result = compute_co_report_intensity([], days=3, now=now)
+    assert len(result) == 3
+    assert all(r["big_cluster_count"] == 0 for r in result)
