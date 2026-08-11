@@ -26,7 +26,19 @@ USER_AGENT = "Mozilla/5.0 (compatible; tech-monitoring-mcp/0.1; +internal use)"
 # 제목과 무관한(대부분 서로 겹치는) 본문으로 오염됐었다("Nikita Bier 퇴사" 기사에
 # "Meta Muse Code 출시" 본문이 들어가는 식). Techmeme summary는 해당 헤드라인만
 # 담은 한 문단이라 이미 정확하므로, 본문 추출을 아예 시도하지 않고 summary로 대체한다.
-SKIP_EXTRACTION_HOSTS = {"www.techmeme.com", "techmeme.com"}
+#
+# openai.com / mckinsey.com: 2026-08-11 실측 — 커스텀 UA든 실제 크롬 UA든 관계없이
+# openai.com은 Cloudflare 관리형 챌린지(응답 헤더 cf-mitigated: challenge)로 매번 403,
+# mckinsey.com은 Akamai 봇 매니저로 403 또는 응답 자체가 멈춰 타임아웃난다. 둘 다
+# UA/헤더로 우회 가능한 수준이 아닌 정식 봇 차단이라 재시도해도 성공 확률이 없다.
+# content가 NULL로 남아 매 파이프라인 실행마다 같은 URL을 다시 시도하며 수 분을
+# 낭비했으므로(배치 200건 중 다수를 이 두 소스가 차지), Techmeme과 동일하게
+# 추출 자체를 스킵하고 RSS summary로 대체한다.
+SKIP_EXTRACTION_HOSTS = {
+    "www.techmeme.com", "techmeme.com",
+    "openai.com", "www.openai.com",
+    "www.mckinsey.com", "mckinsey.com",
+}
 
 
 def _should_skip(url: str) -> bool:
