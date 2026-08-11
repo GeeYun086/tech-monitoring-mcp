@@ -1,3 +1,4 @@
+import random
 import time
 from urllib.parse import urlparse
 
@@ -6,7 +7,9 @@ import trafilatura
 
 from tech_monitoring.db.connection import get_connection
 
-REQUEST_DELAY_SECONDS = 0.5
+# 2026-08-11: 고정 0.5초 간격은 규칙적인 요청 패턴을 만든다. 범위를 두고
+# 무작위로 뽑아 간격을 흐트러뜨린다(rss.py의 SOURCE_DELAY_RANGE_SECONDS와 동일한 취지).
+REQUEST_DELAY_RANGE_SECONDS = (0.3, 0.8)
 # 2026-08-11 실사용 중 발견: trafilatura.fetch_url()이 내부적으로 쓰는
 # 다운로드 타임아웃(설정 파일상 기본 30초)이 이 환경에선 실제로 안 걸렸다
 # — use_config()로 기본 설정을 불러와봐도 섹션이 비어 있어(라이브러리
@@ -102,7 +105,7 @@ def backfill_content(batch_size: int = 200) -> dict:
             else:
                 failed += 1
 
-        time.sleep(REQUEST_DELAY_SECONDS)
+        time.sleep(random.uniform(*REQUEST_DELAY_RANGE_SECONDS))
 
     conn.close()
     return {"attempted": len(rows), "extracted": extracted, "failed": failed, "skipped": skipped}

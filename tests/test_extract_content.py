@@ -68,3 +68,24 @@ def test_does_not_skip_direct_article_urls():
     아님) 본문 추출을 그대로 시도해야 한다."""
     assert not _should_skip("https://blog.cloudflare.com/cloudflare-os/")
     assert not _should_skip("https://www.theverge.com/tech/975677/some-article")
+
+
+def test_delay_between_requests_is_randomized_within_configured_range(monkeypatch):
+    """고정 0.5초 간격은 규칙적인 요청 패턴을 만들어 봇 탐지에 취약하다.
+    REQUEST_DELAY_RANGE_SECONDS 범위에서 매번 무작위로 뽑아 쓰는지 확인한다."""
+    sleeps = []
+
+    def fake_get(url, headers=None, timeout=None, follow_redirects=None):
+        raise Exception("네트워크 호출은 안 함 — 지연만 확인")
+
+    monkeypatch.setattr(
+        extract_content, "get_connection",
+        lambda: _FakeConn([(1, "https://example.com/a"), (2, "https://example.com/b")]),
+    )
+    monkeypatch.setattr(extract_content.httpx, "get", fake_get)
+    monkeypatch.setattr(extract_content.random, "uniform", lambda a, b: 0.42)
+    monkeypatch.setattr(extract_content.time, "sleep", lambda s: sleeps.append(s))
+
+    extract_content.backfill_content(batch_size=2)
+
+    assert sleeps == [0.42, 0.42]
