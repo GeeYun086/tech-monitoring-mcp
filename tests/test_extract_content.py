@@ -1,4 +1,56 @@
+from tech_monitoring.collectors import extract_content
 from tech_monitoring.collectors.extract_content import _should_skip
+
+
+class _FakeCursor:
+    def __init__(self, select_result):
+        self._select_result = select_result
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, *args, **kwargs):
+        pass
+
+    def fetchall(self):
+        return self._select_result
+
+
+class _FakeConn:
+    """실제 DB 없이 backfill_content()의 흐름만 태우기 위한 최소 스텁."""
+
+    def __init__(self, select_result):
+        self._select_result = select_result
+
+    def cursor(self):
+        return _FakeCursor(self._select_result)
+
+    def close(self):
+        pass
+
+
+def test_fetch_always_passes_an_explicit_timeout(monkeypatch):
+    """실사용 중 발견(2026-08-11): trafilatura.fetch_url()의 다운로드
+    타임아웃이 이 환경에서 실제로 안 걸려서, 응답 없는 서버 하나 때문에
+    파이프라인 전체가 18시간 넘게 멈췄다(예외조차 안 떠서 try/except도
+    무용지물). httpx로 직접 받아오면서 반드시 timeout을 명시해야 한다 —
+    이 회귀 테스트는 그 타임아웃 인자가 실수로 빠지는 걸 막는다."""
+    captured = {}
+
+    def fake_get(url, headers=None, timeout=None, follow_redirects=None):
+        captured["timeout"] = timeout
+        raise Exception("네트워크 호출은 안 함 — 인자만 확인")
+
+    monkeypatch.setattr(extract_content, "get_connection", lambda: _FakeConn([(1, "https://example.com/a")]))
+    monkeypatch.setattr(extract_content.httpx, "get", fake_get)
+
+    extract_content.backfill_content(batch_size=1)
+
+    assert captured["timeout"] == extract_content.REQUEST_TIMEOUT_SECONDS
+    assert captured["timeout"] is not None
 
 
 def test_skips_techmeme_river_page_urls():
