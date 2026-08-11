@@ -114,6 +114,20 @@ def apply_stage5() -> dict:
     titles = [r[2] for r in rows]
     cluster_of = cluster_articles(ids, vectors, settings.cluster_similarity_threshold, titles)
 
+    # cluster_articles()는 이번 배치 안에서만 유일한 이름("cluster-1", "cluster-2", ...)을
+    # 매긴다 — 배치(=apply_stage5 호출)마다 카운터가 1부터 다시 시작되므로, 그대로
+    # DB에 저장하면 서로 다른 배치의 클러스터가 같은 이름으로 충돌한다(실사용 중 발견:
+    # "cluster-12"에 2018년 기사와 2026년 기사가 함께 묶여 있었다 — 무관한 배치의
+    # 12번째 클러스터끼리 이름이 겹친 것). DB 시퀀스로 전역 유일값을 받아 이 배치 안의
+    # 로컬 이름을 치환한다 — cluster_articles() 자체는 순수 함수로 남겨 테스트에
+    # 영향을 주지 않는다.
+    local_names = sorted(set(cluster_of.values()))
+    with conn.cursor() as cur:
+        cur.execute("SELECT nextval('cluster_id_seq') FROM generate_series(1, %s)", (len(local_names),))
+        global_ids = [f"cluster-{row[0]}" for row in cur.fetchall()]
+    local_to_global = dict(zip(local_names, global_ids))
+    cluster_of = {article_id: local_to_global[local] for article_id, local in cluster_of.items()}
+
     cluster_sizes: dict[str, int] = {}
     for cluster_id in cluster_of.values():
         cluster_sizes[cluster_id] = cluster_sizes.get(cluster_id, 0) + 1
