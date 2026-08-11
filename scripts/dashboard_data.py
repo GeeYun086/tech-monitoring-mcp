@@ -30,6 +30,28 @@ cross_region_lag·co_report_intensity는 cluster_id가 배치마다 재사용되
 충돌 버그(fix/cluster-id-global-uniqueness에서 수정)가 고쳐져 있어야
 의미 있는 값이 나온다.
 
+2026-08-11 3차 확장: "결과가 너무 일반적이다"는 재지적 — 원인 진단 결과
+단어 하나(unigram) 단위 토큰화가 핵심이었다("AI"·"모델"처럼 최상위
+개념어가 항상 지배). 새 NLP 모델 없이 지금 있는 신호로 개선:
+  - 워드클라우드(keywords_domestic/global)·급상승 키워드가 구(phrase,
+    1~2단어) 후보 + TF-IDF 기반 순위로 바뀌었다(문서빈도 기반 다운웨이팅 —
+    예전처럼 {"AI","인공지능"} 두 단어만 하드코딩 제외하던 방식을 대체)
+  - rising_keywords → keyword_anomaly: 직전 1개 기간과의 절대 증가폭
+    비교에서, 여러 이전 기간의 평균·표준편차 대비 비중(share, %) 기준
+    z-score로 바뀌었다(수집량 자체가 급변한 시기라 원시 빈도 비교는
+    착시를 만든다 — 아래 compute_keyword_anomaly docstring 참고)
+  - keyword_lifecycle: 상위 구의 일별 언급 추이(신규)
+  - keyword_bubbles·keyword_network·keyword_gap·entity_ranking은 이번에는
+    그대로 두었다(범위를 좁혀 먼저 검증) — 같은 처리를 원하면 후속 작업.
+
+  **시도했다가 되돌린 것**: title+summary 대신 content(전체 본문)를
+  써봤다. 실사용 검증 결과 (1) 일부 페이지의 본문 추출 과정에서 섞여
+  들어온 UI 네비게이션 텍스트("PDF"·"Explorer"·"Finder" 등)가 급상승
+  키워드 상위를 오염시켰고, (2) 본문 분량에 담긴 흔한 서술어·부사가
+  summary 전용으로 만든 스톱워드 목록으로 걸러지지 않아 워드클라우드
+  상위를 대신 차지했다 — 결과가 오히려 더 나빠져서 summary만 쓰던
+  방식으로 되돌렸다(_article_text() docstring 참고).
+
 이 집계 함수들은 MCP 도구(queries.py)를 거치지 않고 DB를 직접 조회한다 —
 MCP 응답은 Claude 컨텍스트에 그대로 들어가므로 크기를 계속 제한해왔지만
 (MAX_LIMIT=50 등), 이 스크립트의 출력은 원본 행이 아니라 이미 집계된
@@ -44,6 +66,7 @@ MCP 응답은 Claude 컨텍스트에 그대로 들어가므로 크기를 계속 
 
 import argparse
 import json
+import math
 import re
 import sys
 from collections import Counter
@@ -102,6 +125,15 @@ _STOPWORDS = {
     "across", "first", "one", "two", "three", "get", "gets", "getting",
     "make", "makes", "making", "like", "still", "even", "while", "using",
     "use", "used",
+    # 2026-08-11 3차 확장: 구(phrase)+TF-IDF로 해외 워드클라우드를 다시
+    # 돌려보니, arXiv 논문 초록에 흔한 서술체 표현("we show that...",
+    # "however, ...", "results demonstrate...")이 중간 빈도 우대 특성과
+    # 만나 상위권을 차지했다 — 내용 있는 명사가 아니라 논문 특유의
+    # 문장 골격일 뿐이다. "paper"도 소스 자체가 arXiv 위주라(전체
+    # 해외 기사의 상당수) 주제어가 아니라 포맷 명칭에 가까워 함께 제외한다.
+    "however", "show", "shows", "shown", "showed", "demonstrate",
+    "demonstrates", "demonstrated", "appear", "appears", "appeared",
+    "remain", "remains", "remained", "under", "only", "paper", "papers",
 }
 _WORD_RE = re.compile(r"[A-Za-z가-힣][A-Za-z가-힣'\-]{1,}")
 _URL_RE = re.compile(r"https?://\S+")
@@ -127,15 +159,13 @@ def classify_region(source: str) -> str:
     return "domestic" if source in DOMESTIC_SOURCES else "global"
 
 
-def _tokens(text: str) -> set[str]:
-    """텍스트 한 건에서 불용어·URL·HN 메타데이터를 걸러낸 토큰 집합(중복 제거,
-    대소문자 다른 변형은 첫 등장 표기만 남김). _count_keywords와 아래 새 집계
-    함수들(동시출현·급상승·버블·갭·엔티티)이 전부 이 함수 하나를 공유한다 —
-    "무엇을 단어로 볼지"에 대한 판단이 여러 곳에 흩어지면 필터 기준이
-    은근슬쩍 갈라진다."""
+def _filtered_words(text: str) -> list[str]:
+    """불용어·URL·HN 메타데이터를 걸러낸 단어를 원문 순서 그대로 나열한다
+    (중복 제거 안 함 — n-gram을 만들려면 인접 관계가 필요하다). _tokens()와
+    _phrase_candidates()가 이 함수 하나를 공유한다 — "무엇을 단어로 볼지"에
+    대한 판단이 여러 곳에 흩어지면 필터 기준이 은근슬쩍 갈라진다."""
     cleaned = _clean_for_keywords(text)
-    result: set[str] = set()
-    seen_lower: set[str] = set()
+    words: list[str] = []
     for raw_match in _WORD_RE.findall(cleaned):
         # _WORD_RE가 아포스트로피·하이픈을 단어 중간 문자로 허용해서, "AI's"
         # 뒤에 온점·따옴표가 곧장 붙으면 "AI'"처럼 꼬리에 구두점만 남은 조각이
@@ -145,14 +175,55 @@ def _tokens(text: str) -> set[str]:
         if not match:
             continue
         lower = match.lower()
-        if lower in _STOPWORDS or match in _KOREAN_STOPWORDS or len(lower) < 2 or lower in seen_lower:
+        if lower in _STOPWORDS or match in _KOREAN_STOPWORDS or len(lower) < 2:
             continue
-        seen_lower.add(lower)
-        result.add(match)
-    return result
+        words.append(match)
+    return words
+
+
+def _tokens(text: str) -> set[str]:
+    """텍스트 한 건에서 걸러진 단어의 집합(중복 제거, 유니그램만). 동시출현
+    네트워크·버블차트·갭 분석·엔티티 랭킹처럼 "단어 하나" 단위가 맞는
+    지표는 계속 이 함수를 쓴다(2026-08-11 3차 확장에서 워드클라우드·급상승
+    키워드만 구 단위 `_phrase_candidates()`로 옮겼다 — 아래 참고)."""
+    return set(_filtered_words(text))
+
+
+# 2026-08-11 3차 확장: 담당자 지적 — 단어 하나 단위로만 세면 "AI"·"모델"
+# 같은 최상위 개념어가 항상 1위를 차지해서 "생성형 AI"·"비용 절감"처럼
+# 실제로 구체적인 표현은 절대 드러나지 않는다. 불용어를 먼저 제거한 뒤
+# 남은 단어를 이어붙여 1~2단어짜리 구(phrase)까지 후보로 넓힌다.
+# 3단어 이상은 기사마다 표현이 제각각이라(재사용도가 낮아) 대부분
+# "여러 기사에 걸쳐 뜨는 화제"를 찾는 이 지표엔 노이즈에 가까워 2단어까지만 쓴다.
+_PHRASE_MAX_N = 2
+
+
+def _phrase_candidates(text: str, max_n: int = _PHRASE_MAX_N) -> set[str]:
+    """유니그램에 더해 1~max_n개짜리 연속 구(phrase)까지 후보로 만든다
+    (기사 한 건 안 중복은 한 번만 — _tokens()와 같은 원칙). 원문에서
+    불용어가 중간에 끼어 있어도(예: "AI 이번 모델") 불용어를 먼저 걷어낸
+    뒤 이어붙이므로 "AI 모델"이 바이그램으로 잡힌다 — 원문에서 안 붙어
+    있어도 의미상 이어지는 표현을 구로 묶기 위한 의도적 설계다."""
+    words = _filtered_words(text)
+    candidates: set[str] = set()
+    for n in range(1, max_n + 1):
+        for i in range(len(words) - n + 1):
+            candidates.add(" ".join(words[i:i + n]))
+    return candidates
 
 
 def _article_text(article: dict) -> str:
+    """제목 + 요약. **content(전체 본문)는 일부러 안 쓴다** — 2026-08-11
+    3차 확장 중 실사용 검증으로 시도했다가 되돌렸다: content를 쓰니
+    (1) 논문/코드호스팅 페이지 본문 추출 과정에서 섞여 들어온 UI
+    네비게이션 텍스트("PDF"·"Explorer"·"Finder"·"Loading Bibliographic"
+    등)가 급상승 키워드 상위를 오염시켰고, (2) 본문 분량(평균 5700자)에
+    포함된 흔한 서술어·부사("roughly"·"whose"·"stop"·"added" 등)가
+    summary 전용으로 만든 스톱워드 목록으로 걸러지지 않아 워드클라우드
+    상위를 대신 차지했다. 두 문제 다 "본문을 문장 구조까지 이해하고
+    걸러내는" 수준의 처리(NLP)가 있어야 풀리는데, 그건 지금 범위 밖이다
+    (2-2절 참고). summary는 짧아 구체적 표현이 덜 담기는 대신 상대적으로
+    깨끗하다는 트레이드오프가 있고, 지금은 깨끗한 쪽을 택한다."""
     return f"{article.get('title') or ''} {article.get('summary') or ''}"
 
 
@@ -164,6 +235,44 @@ def _count_keywords(texts: list[str], top_n: int) -> list[dict]:
     for text in texts:
         counter.update(_tokens(text))
     return [{"word": word, "count": count} for word, count in counter.most_common(top_n)]
+
+
+def _tfidf_rank(term_sets: list[set[str]], top_n: int) -> list[dict]:
+    """로그 감쇠 TF(sublinear TF) × IDF(문서빈도 기반 희소성 가중치)로
+    순위를 매긴다. term_sets는 문서(기사) 하나당 등장한 term의 집합 목록 —
+    이미 문서 내 중복은 제거된 상태라고 가정한다(_tokens/_phrase_candidates가
+    그렇게 만듦).
+
+    **주의 — 처음 짠 공식(`count × idf`)은 검증 결과 틀렸다.** term_sets가
+    문서당 집합이라 tf(전체 등장 횟수)와 df(등장 문서 수)가 항상 같은
+    값이 된다. 그러면 `count × idf`는 사실상 `df × idf`가 되는데, idf는
+    로그 스케일로만 줄어드는 반면 df는 선형으로 커서, df=84("AI") 같은
+    항목이 df=13("AX") 같은 구체적인 항목보다 **여전히 압도적으로 높은
+    점수**를 받았다(실측: score(AI)=104 vs score(AX)=40, N=107 기준).
+    즉 예전 하드코딩 제외 방식보다 나아진 게 없었다.
+
+    수정: TF에 로그 감쇠(`1 + ln(count)`, sublinear TF — 검색엔진 랭킹에서
+    쓰는 표준 기법)를 적용해 빈도의 영향력을 압축했다. 이러면 점수가
+    "적당히 자주 나오지만 모든 문서에 있진 않은" 중간 대역(실측 데이터
+    기준 count≈13~15 부근)에서 최고점을 찍고, 아주 흔한 단어(count=84)와
+    아주 드문 단어(count=1~2) 양쪽 다 하위권으로 밀린다 — 원하던 "특정
+    화제가 최상위 개념어보다 위로 오게" 하는 동작이 실제로 나온다."""
+    n_docs = len(term_sets) or 1
+    tf: Counter[str] = Counter()
+    df: Counter[str] = Counter()
+    for terms in term_sets:
+        tf.update(terms)
+        df.update(terms)  # terms가 이미 set이므로 문서당 1회만 반영됨
+    scored = []
+    for term, count in tf.items():
+        idf = math.log((n_docs + 1) / (df[term] + 1)) + 1
+        tf_weight = 1 + math.log(count) if count > 0 else 0.0
+        scored.append({
+            "word": term, "count": count, "doc_freq": df[term],
+            "score": round(tf_weight * idf, 2),
+        })
+    scored.sort(key=lambda r: -r["score"])
+    return scored[:top_n]
 
 
 def _weights() -> dict[str, float]:
@@ -212,7 +321,8 @@ def fetch_all_recent(days: int = 14, offset_days: int = 0) -> list[dict]:
     "전기(前期)" 데이터(지지난 7일). cluster_id도 함께 뽑는다 — 국내-해외
     보도 시차·동시보도 강도 집계에 필요하다(cluster_id 배치 충돌 버그를
     고친 fix/cluster-id-global-uniqueness가 먼저 적용돼 있어야 이 값들이
-    의미를 가진다)."""
+    의미를 가진다). content(전체 본문)는 일부러 뽑지 않는다 —
+    _article_text() docstring 참고(본문을 써봤다가 노이즈가 늘어 되돌림)."""
     conn = get_connection()
     try:
         with conn.cursor() as cur:
@@ -297,9 +407,28 @@ def compute_impact_distribution(articles: list[dict]) -> list[dict]:
 
 
 def compute_keyword_cloud(articles: list[dict], region: str, top_n: int = 20) -> list[dict]:
-    """지정한 지역(국내/해외)의 전체 기사 제목·요약에서 빈도 상위 단어를 뽑는다.
-    관련도 필터 기준이 아니라 "무슨 단어가 자주 나오는지" 참고 표시용이다."""
+    """지정한 지역(국내/해외)의 전체 기사에서 화제 상위를 뽑는다. 관련도
+    필터 기준이 아니라 "무슨 화제가 자주 나오는지" 참고 표시용이다.
+
+    2026-08-11 3차 확장: 단어 하나 단위 빈도만 쓰던 이전 버전은 "결과가
+    너무 일반적이다"는 지적을 받았다. 구(phrase, 1~2단어) 후보 + TF-IDF로
+    바꾸니 해외(영문) 쪽은 뚜렷이 나아졌다("OpenAI"·"accuracy"·
+    "benchmarks"·"capabilities" 같은 구체적 용어가 올라옴, "AI" 같은
+    최상위 개념어는 자동으로 하위권행).
+
+    **국내는 실사용 검증 후 되돌렸다** — 한국어는 형태소 분석이 없어서
+    "기술을"·"모델을"·"기업의"처럼 조사가 붙은 채로 별도 토큰이 되는데
+    (이건 새 구 기능과 무관하게 원래 있던 유니그램 토큰화의 한계다),
+    TF-IDF가 "너무 흔하지도 너무 드물지도 않은" 중간 빈도를 우대하는
+    특성과 만나면 이런 조사 결합형이 대거 상위권을 차지해 버렸다(영어는
+    단어가 이미 공백으로 분리돼 있어 이 문제가 없다). 그래서 지역별로
+    비대칭 처리한다 — 국내는 기존 유니그램+원시 빈도(2차 확장 방식) 유지,
+    해외만 구+TF-IDF. 임시방편이 아니라 "한국어 형태소 분석 부재"라는
+    실제 원인에 대한 정직한 대응이다."""
     texts = [_article_text(a) for a in articles if classify_region(a["source"]) == region]
+    if region == "global":
+        term_sets = [_phrase_candidates(t) for t in texts]
+        return _tfidf_rank(term_sets, top_n)
     return _count_keywords(texts, top_n)
 
 
@@ -337,30 +466,122 @@ def compute_keyword_network(articles: list[dict], top_nodes: int = 24, min_weigh
     return {"nodes": nodes, "edges": edges}
 
 
-def compute_rising_keywords(current: list[dict], previous: list[dict], top_n: int = 15) -> list[dict]:
-    """이번 기간 대비 직전 기간 키워드 빈도 증가폭(delta) 상위 — "이주의
-    급상승 키워드". 증가율(%)이 아니라 절대 증가폭을 1차 정렬 기준으로
-    쓴다 — 1건→3건처럼 표본이 작은 단어가 "200% 증가"로 과장되는 걸
-    막기 위해서다(비율은 극단값에 취약하다)."""
-    now_counter: Counter[str] = Counter()
-    for a in current:
-        now_counter.update(_tokens(_article_text(a)))
-    prev_counter: Counter[str] = Counter()
-    for a in previous:
-        prev_counter.update(_tokens(_article_text(a)))
+# 8월 초 새 소스 추가 이전 몇 주는 주간 수집량이 5~25건뿐이라(이후
+# 150건대로 급증) baseline에 너무 오래된 저수집량 기간까지 섞이면 여전히
+# 왜곡된다 — 4주 전체보다 최근 3개 기간(기본 21일)으로 좁혀서 그 영향을
+# 줄인다. 데이터가 더 쌓이면 이 값을 늘려도 된다.
+_ANOMALY_BASELINE_PERIODS = 3
 
+
+def _candidate_terms(article: dict) -> set[str]:
+    """화제 후보 추출 — compute_keyword_cloud와 같은 이유로 지역별로 다르게
+    처리한다: 해외 기사는 구(phrase, 1~2단어)까지, 국내 기사는 유니그램만
+    (한국어는 형태소 분석이 없어 "기술을"·"모델을"처럼 조사가 붙은 채로
+    별도 토큰이 되는데, 여러 기간 비교에 쓰이는 이 함수들에서도 TF-IDF
+    유사 랭킹과 만나면 같은 문제가 재현될 수 있어 국내는 보수적으로 간다).
+    compute_keyword_anomaly·compute_keyword_lifecycle이 이 함수를 공유한다
+    — 국내/해외가 섞인 기간 데이터를 다루므로 기사 단위로 판단해야 한다."""
+    text = _article_text(article)
+    if classify_region(article["source"]) == "global":
+        return _phrase_candidates(text)
+    return _tokens(text)
+
+
+def _phrase_share_counter(articles: list[dict]) -> tuple[Counter[str], int]:
+    """기간 하나 안에서 화제별 등장 기사 수 카운터 + 그 기간 총 기사 수.
+    원시 빈도가 아니라 "비중(share)"을 계산하기 위한 재료다 — 아래
+    compute_keyword_anomaly 참고."""
+    counter: Counter[str] = Counter()
+    for a in articles:
+        counter.update(_candidate_terms(a))
+    return counter, (len(articles) or 1)
+
+
+def compute_keyword_anomaly(
+    current: list[dict], baseline_periods: list[list[dict]], top_n: int = 15
+) -> list[dict]:
+    """이번 기간 구(phrase) 언급 **비중(share, %)**이 최근 baseline_periods
+    (기본 3개 이전 기간)의 평균·표준편차 대비 얼마나 벗어났는지(z-score)로
+    급상승을 판정한다 — "이주의 급상승 키워드".
+
+    2026-08-11 3차 확장: 원래는 직전 1개 기간과의 절대 증가폭(delta)만
+    비교했다. 그런데 이 프로젝트는 수집을 시작한 지 얼마 안 됐고, 8월 초
+    새 소스(AI타임스·전자신문 등) 추가로 주간 수집량이 5~25건에서 150건대로
+    6~8배 급증했다 — 원시 빈도로 비교하면 이 수집량 자체의 변화 때문에
+    "AI"를 포함한 거의 모든 단어가 "급상승"으로 잘못 잡힌다. 원시 빈도
+    대신 "그 기간 전체 기사 중 이 구가 나온 기사의 비중(%)"으로 정규화하면
+    이 효과가 상쇄된다. 또한 baseline을 1개가 아니라 여러 기간으로 넓혀
+    평균·표준편차를 구하면 "원래 들쭉날쭉한 단어"와 "진짜 새로 뜬 단어"를
+    구분할 수 있다 — 표본이 1개뿐이면 우연한 변동과 추세를 구분할 근거가
+    없다.
+
+    알려진 한계: 이 시스템은 아직 몇 주치 데이터밖에 없어서, 초기 저수집량
+    기간이 baseline에 섞이면 여전히 왜곡될 수 있다 — 앞으로 몇 주 더
+    쌓이면 이 지표의 신뢰도가 자연히 올라간다."""
+    now_counter, now_total = _phrase_share_counter(current)
+
+    baseline_shares: dict[str, list[float]] = {}
+    for period in baseline_periods:
+        counter, total = _phrase_share_counter(period)
+        for term, count in counter.items():
+            baseline_shares.setdefault(term, []).append(count / total * 100)
+
+    n_baseline = len(baseline_periods) or 1
     rows = []
-    for word, count_now in now_counter.items():
-        count_prev = prev_counter.get(word, 0)
-        delta = count_now - count_prev
-        if delta <= 0:
-            continue
+    for term in set(now_counter) | set(baseline_shares):
+        now_share = now_counter.get(term, 0) / now_total * 100
+        history = baseline_shares.get(term, [])
+        history = history + [0.0] * (n_baseline - len(history))  # 등장 안 한 기간은 0으로 채움
+        avg = sum(history) / n_baseline
+        variance = sum((h - avg) ** 2 for h in history) / n_baseline
+        stdev = variance ** 0.5
+        if now_share <= avg:
+            continue  # 늘지 않았으면 "급상승"이 아니다
+        # 표준편차가 0에 가까우면(과거에 전혀 없었거나 항상 똑같았던 경우)
+        # 0으로 나누는 대신 최소 변동폭을 깔아 무한대 z-score를 방지한다.
+        z_score = (now_share - avg) / max(stdev, 0.05)
         rows.append({
-            "word": word, "count_now": count_now, "count_prev": count_prev,
-            "delta": delta, "is_new": count_prev == 0,
+            "word": term,
+            "share_now_pct": round(now_share, 3),
+            "baseline_avg_pct": round(avg, 3),
+            "z_score": round(z_score, 2),
+            "is_new": avg == 0,
         })
-    rows.sort(key=lambda r: (-r["delta"], -r["count_now"]))
+    rows.sort(key=lambda r: -r["z_score"])
     return rows[:top_n]
+
+
+def compute_keyword_lifecycle(articles: list[dict], days: int, top_n_terms: int = 6, now: datetime | None = None) -> dict:
+    """상위 top_n_terms개 구(phrase)의 일별 언급 빈도 추이 — "이 화제가
+    언제 떠서 언제 식었는지"를 보여준다(키워드 수명주기). 어떤 구를
+    "상위"로 볼지는 TF-IDF 점수 기준으로 고른다 — 단순 빈도 상위로
+    고르면 결국 "AI"류가 다시 차지한다."""
+    now = now or datetime.now(timezone.utc)
+    today = now.date()
+    term_sets_by_day: dict[str, list[set[str]]] = {
+        (today - timedelta(days=offset)).isoformat(): [] for offset in range(days)
+    }
+
+    for a in articles:
+        published = a.get("published_at")
+        if published is None:
+            continue
+        day = published.date().isoformat()
+        if day not in term_sets_by_day:
+            continue
+        term_sets_by_day[day].append(_candidate_terms(a))
+
+    all_term_sets = [ts for sets_ in term_sets_by_day.values() for ts in sets_]
+    top_terms = [row["word"] for row in _tfidf_rank(all_term_sets, top_n_terms)]
+
+    series = []
+    for day in sorted(term_sets_by_day):
+        counts: Counter[str] = Counter()
+        for term_set in term_sets_by_day[day]:
+            counts.update(t for t in term_set if t in top_terms)
+        series.append({"date": day, **{term: counts.get(term, 0) for term in top_terms}})
+
+    return {"terms": top_terms, "series": series}
 
 
 def compute_keyword_bubbles(current: list[dict], previous: list[dict], top_n: int = 20) -> list[dict]:
@@ -556,15 +777,22 @@ def build(
     digest["keywords"] = extract_keywords(digest["clusters"])
 
     all_recent = fetch_all_recent(days=trend_days)
-    # 급상승 키워드·버블차트는 "이번 기간 vs 바로 직전 같은 길이의 기간"을
+    # 급상승 키워드(anomaly)·버블차트는 "이번 기간 vs 그 이전 여러 기간"을
     # 비교한다 — trend_days(추이 그래프용, 기본 14일)와 별개로 compare_days
-    # (기본 7일)를 쓴다. 두 창은 겹치지 않는다(offset_days로 뒤로 민다).
+    # (기본 7일)를 쓴다. 창들은 서로 겹치지 않는다(offset_days로 뒤로 민다).
+    # baseline_periods[0]이 곧 예전 "previous_period"(바로 직전 기간)다 —
+    # keyword_bubbles는 그 하나만 필요하므로 재조회하지 않고 재사용한다.
     current_period = fetch_all_recent(days=compare_days)
-    previous_period = fetch_all_recent(days=compare_days, offset_days=compare_days)
+    baseline_periods = [
+        fetch_all_recent(days=compare_days, offset_days=compare_days * k)
+        for k in range(1, _ANOMALY_BASELINE_PERIODS + 1)
+    ]
+    previous_period = baseline_periods[0]
 
     digest["trends"] = {
         "window_days": trend_days,
         "compare_days": compare_days,
+        "anomaly_baseline_periods": _ANOMALY_BASELINE_PERIODS,
         "total_domestic": sum(1 for a in all_recent if classify_region(a["source"]) == "domestic"),
         "total_global": sum(1 for a in all_recent if classify_region(a["source"]) == "global"),
         "volume_trend": compute_volume_trend(all_recent, trend_days),
@@ -572,8 +800,9 @@ def build(
         "impact_distribution": compute_impact_distribution(all_recent),
         "keywords_domestic": compute_keyword_cloud(all_recent, "domestic"),
         "keywords_global": compute_keyword_cloud(all_recent, "global"),
+        "keyword_lifecycle": compute_keyword_lifecycle(all_recent, trend_days),
         "keyword_network": compute_keyword_network(all_recent),
-        "rising_keywords": compute_rising_keywords(current_period, previous_period),
+        "rising_keywords": compute_keyword_anomaly(current_period, baseline_periods),
         "keyword_bubbles": compute_keyword_bubbles(current_period, previous_period),
         "keyword_gap": compute_keyword_gap(all_recent),
         "entity_ranking": compute_entity_ranking(all_recent),

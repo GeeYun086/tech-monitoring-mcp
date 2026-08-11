@@ -87,9 +87,13 @@ stdout으로 JSON 하나를 출력한다. 구조:
   "source_distribution": [{"source": "arXiv cs.AI", "region": "global", "count": 49}, ...],
   "impact_distribution": [{"bucket_start": 0.4, "domestic": 59, "global": 86}, ...],
   "keywords_domestic": [{"word": "AI", "count": 87}, ...],
-  "keywords_global": [{"word": "AI", "count": 74}, ...]
+  "keywords_global": [{"word": "language models", "count": 13, "doc_freq": 13, "score": 11.9}, ...]
 }
 ```
+
+`keywords_domestic`과 `keywords_global`의 필드가 다르다 — 2026-08-11 3차
+확장에서 해외만 구(phrase)+TF-IDF로 바뀌었기 때문이다(`doc_freq`·`score`
+필드는 해외에만 있다). 이유는 아래 2-3절 참고.
 
 `region`(국내/해외)은 `dashboard_data.py`의 `DOMESTIC_SOURCES` — **등록된
 소스 이름 목록** 기반이다. 언어 자동 감지가 아니다(언어 감지는 새 소스가
@@ -114,7 +118,8 @@ stdout으로 JSON 하나를 출력한다. 구조:
   "compare_days": 7,
   "keyword_network": {"nodes": [{"word": "AI", "count": 84}, ...],
                        "edges": [{"source": "AI", "target": "모델", "weight": 17}, ...]},
-  "rising_keywords": [{"word": "LLM", "count_now": 25, "count_prev": 1, "delta": 24, "is_new": false}, ...],
+  "rising_keywords": [{"word": "LLM", "share_now_pct": 8.18, "baseline_avg_pct": 0.0,
+                        "z_score": 163.6, "is_new": true}, ...],
   "keyword_bubbles": [{"word": "LLM", "mention_count": 25, "growth_rate": 24.0,
                         "source_count": 9, "is_new": false}, ...],
   "keyword_gap": {"global_only": [{"word": "models", "domestic_share": 0.0, "global_share": 22.76}, ...],
@@ -132,11 +137,12 @@ stdout으로 JSON 하나를 출력한다. 구조:
 각 지표가 무엇을 근사하는지, 왜 그렇게 계산했는지는 `scripts/dashboard_data.py`의
 `compute_*` 함수 docstring에 있다 — 특히 다음 셋은 반드시 읽고 화면에 반영한다:
 
-- **`rising_keywords`/`keyword_bubbles`는 "AI"·"인공지능"을 반드시 화면에서
-  제외한다.** 이 데이터셋의 주제어 자체라 항상 델타·언급량 1위를 차지해서
-  다른 신호를 다 가린다(스크립트는 원값을 그대로 반환하므로, 이 필터링은
-  Claude가 렌더링 시점에 한다 — 언제나 정확히 `{"AI", "인공지능"}` 두 단어만
-  제외).
+- **`keyword_bubbles`는 "AI"·"인공지능"을 반드시 화면에서 제외한다.** 이
+  데이터셋의 주제어 자체라 항상 언급량 1위를 차지해서 다른 신호를 다
+  가린다(스크립트는 원값을 그대로 반환하므로, 이 필터링은 Claude가
+  렌더링 시점에 한다). `rising_keywords`는 2026-08-11 3차 확장에서
+  비중(share) 기반 anomaly score로 바뀌면서 이 문제가 공식 안에서 자연히
+  해소됐다 — 별도 제외 없이 그대로 상위 N개를 써도 된다(아래 2-3절 참고).
 - **`keyword_gap`은 영문 토큰만 비교한 결과다** — "모델"(국내)과
   "model"(해외) 같은 번역어 차이로 인한 착시를 막기 위해서다. 그 결과
   `domestic_only`가 짧거나 비어 있을 수 있는데, 이건 버그가 아니라
@@ -149,6 +155,38 @@ stdout으로 JSON 하나를 출력한다. 구조:
   말고 "이번 기간엔 신뢰할 사례가 없음 + 이유"로 대체한다(실사용 중 발견:
   McKinsey의 일반적인 "AI as force multiplier" 글과 GeekNews의 무관한
   "AI 코딩 에이전트 개발환경" 글이 이렇게 잘못 묶인 적이 있다).
+
+### 2-3. 워드클라우드·급상승 키워드 재설계 (2026-08-11 3차 확장)
+
+담당자 3차 재지적: "결과가 너무 일반적이다." 원인 진단 — 단어 하나
+(unigram) 단위 토큰화라 "AI"·"모델" 같은 최상위 개념어가 항상 지배하고,
+`rising_keywords`(당시 이름)는 직전 1개 기간과의 절대 증가폭만 봐서
+수집량 자체가 급변하면(8월 초 새 소스 추가로 주간 수집량이 6~8배 급증)
+착시가 생겼다. 두 가지를 바꿨다:
+
+1. `keywords_global`은 이제 **구(phrase, 1~2단어) 후보 + TF-IDF**로
+   순위를 매긴다. `keywords_domestic`은 **그대로 유니그램+원시 빈도**다.
+   **비대칭인 이유**: 한국어는 형태소 분석이 없어 "기술을"·"모델을"처럼
+   조사가 붙은 채로 별도 토큰이 되는데, TF-IDF가 "너무 흔하지도 너무
+   드물지도 않은" 중간 빈도를 우대하는 특성과 만나면 이런 조사 결합형이
+   대거 상위권을 차지해 버린다(실사용 중 발견 — 시도했다가 되돌림).
+   영어는 단어가 이미 공백으로 분리돼 있어 이 문제가 없다. 국내 워드클라우드에
+   같은 처리를 적용하려면 형태소 분석기가 먼저 필요하다.
+2. `rising_keywords`는 절대 증가폭 대신 **비중(share, %) 기반 z-score**로
+   바뀌었다 — `baseline_avg_pct`(기본 3개 이전 기간의 평균 비중) 대비
+   `share_now_pct`가 얼마나 벗어났는지. 표준편차까지 반영해 "원래 들쭉날쭉한
+   단어"와 "진짜 새로 뜬 단어"를 구분한다.
+3. `keyword_lifecycle`(신규): 상위 구의 일별 언급 추이. `{"terms": [...],
+   "series": [{"date": "...", "<term>": count, ...}, ...]}` 형태.
+
+**시도했다가 되돌린 것**: `_article_text()`가 title+summary 대신
+content(전체 본문)를 쓰게 해봤다. 실사용 검증 결과 (1) 일부 페이지의
+본문 추출 과정에서 섞여 들어온 UI 네비게이션 텍스트("PDF"·"Explorer"·
+"Finder" 등)가 급상승 키워드 상위를 오염시켰고, (2) 흔한 서술어·부사가
+summary 전용으로 만든 스톱워드 목록으로 걸러지지 않아 워드클라우드
+상위를 대신 차지했다 — 결과가 오히려 더 나빠져서 되돌렸다. **본문을
+쓰는 건 다시 시도하지 말 것** — 먼저 스톱워드 목록을 본문 분량에 맞게
+대폭 확장하거나 품사 태깅 같은 실제 NLP가 있어야 한다.
 
 ### 3. Claude가 하는 일 — 번역과 문구
 

@@ -8,11 +8,12 @@ from scripts.dashboard_data import (
     compute_cross_region_lag,
     compute_entity_ranking,
     compute_impact_distribution,
+    compute_keyword_anomaly,
     compute_keyword_bubbles,
     compute_keyword_cloud,
     compute_keyword_gap,
+    compute_keyword_lifecycle,
     compute_keyword_network,
-    compute_rising_keywords,
     compute_source_distribution,
     compute_volume_trend,
     extract_keywords,
@@ -226,23 +227,92 @@ def test_keyword_network_drops_edges_below_min_weight():
     assert network["edges"] == []  # 동시출현이 1번뿐이면 노이즈로 제외
 
 
-def test_rising_keywords_ranks_by_absolute_delta_not_percent():
-    """1건→3건(200%)보다 5건→10건(100%, delta 5)이 더 위에 와야 한다 —
-    표본이 작은 단어가 퍼센트로 과장되는 걸 막기 위해 delta를 1차 기준으로 쓴다."""
-    current = [_article("TechCrunch", 0, title="alpha topic here")] * 3 + \
-              [_article("TechCrunch", 0, title="beta subject matter")] * 10
-    previous = [_article("TechCrunch", 7, title="alpha topic here")] * 1 + \
-               [_article("TechCrunch", 7, title="beta subject matter")] * 5
-    rows = compute_rising_keywords(current, previous, top_n=5)
-    words_in_order = [r["word"] for r in rows]
-    assert words_in_order.index("beta") < words_in_order.index("alpha")
+# ---- 2026-08-11 3차 확장: 담당자 재지적 — "결과가 너무 일반적이다".
+# 원인 진단: 단어 하나(unigram) 단위 토큰화라 "AI"·"모델" 같은 최상위
+# 개념어가 항상 지배. 새 NLP 모델 없이 구(phrase) 후보 + TF-IDF로 개선.
 
 
-def test_rising_keywords_excludes_flat_or_declining_words():
-    current = [_article("TechCrunch", 0, title="steady term")] * 3
-    previous = [_article("TechCrunch", 7, title="steady term")] * 5
-    rows = compute_rising_keywords(current, previous)
+def test_keyword_cloud_surfaces_bigram_phrases():
+    """실사용 중 발견: 단어 하나 단위로만 세면 "on-device"·"AI"가 따로따로
+    잡혀서 "on-device AI"라는 구체적인 표현 자체가 후보가 못 됐다."""
+    articles = [_article("TechCrunch", 0, title="on-device AI adoption grows")] * 3
+    words = {k["word"] for k in compute_keyword_cloud(articles, "global")}
+    assert "on-device AI" in words
+
+
+def test_keyword_cloud_domestic_stays_unigram_raw_frequency():
+    """실사용 중 발견: 한국어는 형태소 분석이 없어 "기술을"·"모델을"처럼
+    조사가 붙은 채로 별도 토큰이 된다. 구+TF-IDF를 국내에도 적용하니
+    이런 조사 결합형이 TF-IDF의 중간 빈도 우대 특성과 만나 대거 상위권을
+    차지해 버렸다(실측) — 그래서 국내는 의도적으로 기존 유니그램+원시
+    빈도 방식을 유지한다. 바이그램이 섞이면 안 된다."""
+    articles = [_article("AI타임스", 0, title="기술 발전이 빠르게 진행된다")] * 3
+    words = {k["word"] for k in compute_keyword_cloud(articles, "domestic")}
+    assert "기술 발전" not in words  # 바이그램은 국내엔 적용 안 됨
+
+
+def test_keyword_cloud_downweights_ubiquitous_terms_via_tfidf():
+    """실사용 중 발견: 처음 짠 TF-IDF 공식(count×idf)은 문서당 1회만 세는
+    구조상 tf==df가 되어, count=84인 "ubiquitous"가 count=13인 "specific"
+    보다 여전히 압도적으로 높은 점수를 받았다(로그 감쇠 전: 104 vs 40).
+    sublinear TF(1+ln(count))를 적용해야 중간 빈도의 구체적인 단어가
+    최상위 개념어보다 위로 올라온다."""
+    articles = (
+        [_article("TechCrunch", i, title="ubiquitous filler word appears") for i in range(20)]
+        + [_article("TechCrunch", i, title="specific niche phrase repeats") for i in range(6)]
+    )
+    ranked = compute_keyword_cloud(articles, "global", top_n=50)
+    rank_of = {r["word"]: i for i, r in enumerate(ranked)}
+    assert rank_of["specific"] < rank_of["ubiquitous"]
+
+
+def test_keyword_anomaly_uses_share_not_raw_count():
+    """실사용 중 발견: 8월 초 새 소스 추가로 주간 수집량이 6~8배 급증했다 —
+    원시 빈도로 비교하면 이 수집량 변화 자체 때문에 비중이 그대로인
+    단어까지 "급상승"으로 잘못 잡힌다. 비중(share, %)이 똑같으면(20%→20%)
+    급상승이 아니어야 한다."""
+    now = datetime(2026, 8, 11, tzinfo=timezone.utc)
+    # 이번 기간: 100건 중 20건(20%) / 베이스라인: 10건 중 2건(20%, 동일 비중)
+    current = [_article("TechCrunch", 0, now=now, title="specific topic here")] * 20 + \
+              [_article("TechCrunch", 0, now=now, title="unrelated filler content")] * 80
+    baseline = [_article("TechCrunch", 7, now=now, title="specific topic here")] * 2 + \
+               [_article("TechCrunch", 7, now=now, title="unrelated filler content")] * 8
+    rows = compute_keyword_anomaly(current, [baseline])
+    assert "specific" not in {r["word"] for r in rows}
+
+
+def test_keyword_anomaly_flags_genuine_share_increase():
+    now = datetime(2026, 8, 11, tzinfo=timezone.utc)
+    current = [_article("TechCrunch", 0, now=now, title="novelburst topic here")] * 50 + \
+              [_article("TechCrunch", 0, now=now, title="filler content only")] * 50
+    baseline = [_article("TechCrunch", 7, now=now, title="filler content only")] * 10
+    rows = compute_keyword_anomaly(current, [baseline])
+    row = next(r for r in rows if r["word"] == "novelburst")
+    assert row["is_new"] is True
+
+
+def test_keyword_anomaly_excludes_flat_or_declining_share():
+    now = datetime(2026, 8, 11, tzinfo=timezone.utc)
+    current = [_article("TechCrunch", 0, now=now, title="steady term")] * 3 + \
+              [_article("TechCrunch", 0, now=now, title="filler")] * 7
+    baseline = [_article("TechCrunch", 7, now=now, title="steady term")] * 5 + \
+               [_article("TechCrunch", 7, now=now, title="filler")] * 5
+    rows = compute_keyword_anomaly(current, [baseline])
     assert "steady" not in {r["word"] for r in rows}
+
+
+def test_keyword_lifecycle_fills_empty_days_and_tracks_daily_counts():
+    now = datetime(2026, 8, 11, tzinfo=timezone.utc)
+    articles = [
+        _article("TechCrunch", days_ago=0, now=now, title="specific recurring phrase"),
+        _article("TechCrunch", days_ago=1, now=now, title="specific recurring phrase"),
+    ]
+    result = compute_keyword_lifecycle(articles, days=3, top_n_terms=5, now=now)
+    assert len(result["series"]) == 3  # 오늘 포함 3일 전부 존재(데이터 없는 날도 0)
+    by_date = {row["date"]: row for row in result["series"]}
+    assert "specific" in result["terms"]
+    assert by_date["2026-08-11"]["specific"] == 1
+    assert by_date["2026-08-09"]["specific"] == 0  # 데이터 없는 날은 0으로 채움
 
 
 def test_keyword_bubbles_marks_brand_new_words_and_counts_sources():
