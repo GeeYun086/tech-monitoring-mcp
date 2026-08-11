@@ -4,6 +4,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 import feedparser
+import httpx
 
 from tech_monitoring.config import settings
 from tech_monitoring.db.connection import get_connection
@@ -12,6 +13,7 @@ from tech_monitoring.utils.url_normalize import normalize_url
 
 # 일부 사이트는 UA 없는 요청을 봇으로 간주해 403을 반환함 (리서치 문서 "크롤링 여부" 권고 반영)
 USER_AGENT = "Mozilla/5.0 (compatible; tech-monitoring-mcp/0.1; +internal use)"
+REQUEST_TIMEOUT_SECONDS = 20
 
 # hnrss 피드는 본문에 "<p>Points: 190</p>" 형태로 반향 수치를 실어 보낸다.
 # 설계서 v2.0 §5의 파급력 신호 "aggregator points"의 실제 소스.
@@ -32,7 +34,25 @@ def parse_hn_points(summary: str | None) -> int | None:
 
 def collect_source(conn, source: dict) -> dict:
     """단일 소스를 수집해 마스터DB에 적재. last_collected_at 이후 발행분만 반영(B2 증분 수집)."""
-    feed = feedparser.parse(source["feed_url"], agent=USER_AGENT)
+    # 2026-08-11: feedparser에 URL을 직접 넘기면(agent=USER_AGENT) 상태 코드를 안 보고
+    # 응답 바디를 그대로 XML로 파싱한다. arXiv API가 요청 과다 시 XML 대신 평문
+    # "Rate exceeded."(HTTP 429)를 돌려주는데, 이게 "syntax error"라는 엉뚱한
+    # bozo_exception으로 잘못 보고돼 원인 파악이 안 됐다. httpx로 먼저 받아 상태
+    # 코드를 확인한 뒤 본문만 feedparser에 넘겨 진짜 원인을 구분한다.
+    try:
+        resp = httpx.get(
+            source["feed_url"], headers={"User-Agent": USER_AGENT},
+            timeout=REQUEST_TIMEOUT_SECONDS, follow_redirects=True,
+        )
+    except httpx.HTTPError as exc:
+        return {"source": source["name"], "fetched": 0, "inserted": 0, "error": f"request failed: {exc}"}
+
+    if resp.status_code == 429:
+        return {"source": source["name"], "fetched": 0, "inserted": 0, "error": "rate limited (HTTP 429)"}
+    if resp.status_code >= 400:
+        return {"source": source["name"], "fetched": 0, "inserted": 0, "error": f"HTTP {resp.status_code}"}
+
+    feed = feedparser.parse(resp.content)
     if feed.bozo and not feed.entries:
         return {"source": source["name"], "fetched": 0, "inserted": 0, "error": str(feed.bozo_exception)}
 
