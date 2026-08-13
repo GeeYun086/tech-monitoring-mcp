@@ -79,6 +79,19 @@ Streamlit UI가 생기기 전까지는 CLI로 관리한다.
 ./.venv/Scripts/python.exe -m pytest tests/ -q
 ```
 
+## 대시보드
+
+```bash
+./.venv/Scripts/python.exe -m streamlit run app/streamlit_app.py
+```
+
+직접 검색(라이브 호출, DB 저장 안 함) + 고정 키워드 탭(이번 주 주요 키워드
+막대그래프 + 키워드 선택 시 관련 기사만 필터). 계산은 `dashboard_queries.py`가
+전담하고 화면은 레이아웃만 — 데이터가 바뀔 때 손으로 다시 계산할 부분이 없다.
+
+DB 연결 실패(Supabase 무료 티어는 7일 미사용 시 자동 일시정지된다) 시
+10초 내로 원인을 알려주는 에러 메시지를 띄운다(무한 로딩 방지).
+
 ## 스키마
 
 `db/migrations/001_market_keywords_schema.sql` 참고. 테이블 4개:
@@ -122,6 +135,6 @@ scripts/manage_fixed_keywords.py
 
 - 수집(검색엔진) → 후보추출(TF-IDF) → 병합(Gemini) → 오케스트레이터까지 완료.
 - v1 코드(수집기·필터 5단계·MCP 서버·대시보드 데이터 스크립트) 정리 완료.
-- **다음**: Streamlit 대시보드(고정 키워드 탭 + 주요 키워드 워드클라우드/순위 +
-  키워드별 주간 기사 목록 + 직접 검색창). Claude 연결용 MCP는 v2 스키마
-  기준으로 아직 재구축 전(당분간 공백).
+- Streamlit 대시보드(고정 키워드 탭 + 주요 키워드 랭킹 + 키워드별 주간 기사
+  목록 + 직접 검색창)까지 완료.
+- **다음**: Claude 연결용 MCP는 v2 스키마 기준으로 아직 재구축 전(당분간 공백).
