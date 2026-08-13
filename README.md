@@ -9,8 +9,9 @@ goormEDU 전략기획팀 **AX 시장 모니터링**.
 단계에서 원천 차단**하는 방식으로 전환했다.
 
 ```
-사용자가 직접 구성한 Custom Search Engine(화이트리스트 사이트만 검색됨)
-    ↓ dateRestrict=w1(지난 1주일), 고정 키워드마다 top20 같은 인위적 컷 없이 넓게 수집
+Tavily Search API + 코드로 관리하는 화이트리스트(SITE_INCLUDE/EXCLUDE_PATTERNS)
+    ↓ time_range=week(지난 1주일), 고정 키워드×사이트 조합마다 개별 호출,
+    ↓ top20 같은 인위적 컷 없이 넓게 수집 + 화이트리스트 패턴으로 최종 필터
 search_results (원본 기사 풀)
     ↓ TF-IDF(코드, 정확한 카운팅) — 한글/영문 비대칭 처리
 후보 키워드 목록
@@ -19,10 +20,20 @@ search_results (원본 기사 풀)
 market_keywords ("이번 주 주요 키워드" 최종 목록)
 ```
 
-관련도 판별 단계가 따로 없다 — 큐레이션 검색엔진 자체가 관련도를 보장한다는
-게 이 피벗의 핵심 전제다. "파급력"도 별도 스코어링 없이 **언급량(doc_count)
-자체가 신호**라는 더 단순한 모델을 쓴다(사건 단위 교차보도 클러스터링은
-검토 후 제외 — 자세한 배경은 git 히스토리·PR 참고).
+관련도 판별 단계가 따로 없다 — 큐레이션된 화이트리스트 자체가 관련도를
+보장한다는 게 이 피벗의 핵심 전제다. "파급력"도 별도 스코어링 없이
+**언급량(doc_count) 자체가 신호**라는 더 단순한 모델을 쓴다(사건 단위
+교차보도 클러스터링은 검토 후 제외 — 자세한 배경은 git 히스토리·PR 참고).
+
+**검색 API로 원래 Google Custom Search JSON API를 쓰려 했으나(2026-08-13
+실제 연동 중 발견) Google이 2025년 중반 이후 신규 계정에는 이 API 접근을
+막아둬서(2027-01-01 서비스 종료 예정 공지) Tavily Search API로 교체했다.**
+Tavily는 `include_domains`/`exclude_domains`를 API 파라미터로 직접 받아서
+Google처럼 별도 "검색엔진" 설정을 웹 UI에서 만들 필요가 없고, `time_range`로
+기간 제한도 네이티브 지원, 무료 티어 월 1,000크레딧(카드 등록 불필요)이다.
+다만 Tavily의 도메인/경로 매칭 정확도를 100% 신뢰하지 않고, **화이트리스트
+최종 판정은 `collectors/search_engine.py`의 `is_allowed_url()`(담당자가
+검증한 패턴, 코드로 직접 매칭)이 이중으로 강제한다.**
 
 **무료 DB 티어 유지 방침**: 매주 데이터를 통째로 비우고 재수집한다.
 `fixed_keywords`(모니터링 대상 시장 설정)만 보존되고 나머지는
@@ -41,9 +52,9 @@ cp .env.example .env
 
 `.env`에 채울 것:
 - `DATABASE_URL` — Supabase(Postgres 호환) 연결 문자열
-- `GOOGLE_SEARCH_API_KEY` / `GOOGLE_SEARCH_CX` — Custom Search JSON API 키 +
-  [programmablesearchengine.google.com](https://programmablesearchengine.google.com)에서
-  화이트리스트 사이트로 직접 구성한 검색엔진 ID
+- `TAVILY_API_KEY` — [tavily.com](https://tavily.com)에서 발급(무료 티어, 카드 등록 불필요).
+  화이트리스트 사이트 목록은 `collectors/search_engine.py`의
+  `SITE_INCLUDE_PATTERNS`/`SITE_EXCLUDE_PATTERNS`에 코드로 관리(수정 시 이 파일만 고치면 됨)
 - `GEMINI_API_KEY` — 무료 티어
 
 ```bash
@@ -120,7 +131,7 @@ DB 연결 실패(Supabase 무료 티어는 7일 미사용 시 자동 일시정�
 
 ```
 src/tech_monitoring/
-  collectors/search_engine.py   # Custom Search API 수집(dateRestrict=w1)
+  collectors/search_engine.py   # Tavily 수집 + 화이트리스트 이중 검증(time_range=week)
   analysis/keyword_extraction.py  # TF-IDF 후보 추출(코드, 정확한 카운팅)
   analysis/keyword_merge.py       # Gemini 동의어 병합 + market_keywords 확정
   utils/keyword_text.py           # 구(phrase)+TF-IDF 로직(v1에서 이관, 실사용 검증 완료)

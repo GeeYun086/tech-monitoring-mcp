@@ -1,7 +1,5 @@
-"""검색엔진 수집기(collectors/search_engine.py) 페이지네이션·저장 로직 테스트.
-실제 네트워크·DB 없이 _fetch_page와 conn.cursor()를 스텁으로 대체한다
-(tests/test_rss_backoff_and_jitter.py와 같은 패턴).
-"""
+"""검색엔진 수집기(collectors/search_engine.py, Tavily 기반) 테스트.
+실제 네트워크·DB 없이 _fetch_site_results와 conn.cursor()를 스텁으로 대체한다."""
 
 import httpx
 import pytest
@@ -44,140 +42,147 @@ class _FakeConn:
 
 
 def _item(url: str) -> dict:
-    return {"link": url, "title": "제목", "snippet": "요약", "displayLink": "example.com"}
+    return {"url": url, "title": "제목", "content": "요약"}
 
 
-def test_collect_for_keyword_paginates_until_target_reached(monkeypatch):
-    """target_count=15면 10+10=20건으로 목표를 넘기는 2번째 페이지에서 멈춰야 한다
-    (3번째 페이지는 아예 요청하지 않음 — 불필요한 쿼리로 무료 한도를 낭비하지 않기 위해)."""
-    pages = [
-        {"items": [_item(f"https://example.com/{i}") for i in range(10)]},
-        {"items": [_item(f"https://example.com/{i}") for i in range(10, 20)]},
-        {"items": [_item(f"https://example.com/{i}") for i in range(20, 30)]},
-    ]
+# ---- is_allowed_url: 담당자가 실제로 준 화이트리스트 패턴 검증 ----
+# 이 부분이 틀리면 전혀 관련 없는 페이지가 저장되거나, 원하는 기사가 통째로
+# 빠질 수 있어서 가장 꼼꼼하게 테스트한다.
+
+@pytest.mark.parametrize("url", [
+    "https://www.itworld.co.kr/article/123456/ai.html",
+    "https://www.aitimes.com/news/articleView.html?idxno=999",
+    "https://news.hada.io/weekly/123",
+    "https://techcrunch.com/2026/08/13/some-story/",
+    "https://social.techcrunch.com/2026/08/13/some-story/",
+    "https://askedtech.com/knowledge-archive/agent-adoption",
+    "https://www.techmeme.com/260813/p1",
+])
+def test_is_allowed_url_accepts_include_patterns(url):
+    assert search_engine.is_allowed_url(url) is True
+
+
+@pytest.mark.parametrize("url", [
+    "https://www.itworld.co.kr/",  # 루트 페이지(기사 아님)
+    "https://www.aitimes.com/",
+    "https://www.itworld.co.kr/reviews/123",
+    "https://www.itworld.co.kr/how-to/123",
+    "https://www.itworld.co.kr/newsletters/123",
+    "https://www.aitimes.com/news/articleList.html?sc=all",
+    "https://www.techmeme.com/river",
+    "https://www.techmeme.com/lb/1234",
+    "https://www.techmeme.com/about",
+    "https://www.techmeme.com/events",
+    "https://www.techmeme.com/miniriver",
+    "https://techcrunch.com/podcast/equity/",
+    "https://techcrunch.com/author/some-writer/",
+    "https://techcrunch.com/category/ai/",
+    "https://techcrunch.com/tag/openai/",
+    "https://example.com/completely-unrelated",  # 화이트리스트에 아예 없는 도메인
+])
+def test_is_allowed_url_rejects_excluded_or_unlisted(url):
+    assert search_engine.is_allowed_url(url) is False
+
+
+# ---- collect_for_keyword ----
+
+def test_collect_for_keyword_queries_each_site_domain_separately(monkeypatch):
+    """사이트 하나에 결과가 쏠리는 걸 막기 위해 화이트리스트 사이트마다 개별 호출해야 한다."""
     calls = []
 
-    def fake_fetch_page(keyword, start):
-        calls.append(start)
-        return pages[len(calls) - 1]
+    def fake_fetch(keyword, domain):
+        calls.append(domain)
+        return []
 
-    monkeypatch.setattr(search_engine, "_fetch_page", fake_fetch_page)
-    monkeypatch.setattr(search_engine.time, "sleep", lambda s: None)
+    monkeypatch.setattr(search_engine, "_fetch_site_results", fake_fetch)
 
-    result = search_engine.collect_for_keyword(
-        _FakeConn(), run_id=1, fixed_keyword={"id": 1, "keyword": "AX 시장"}, target_count=15,
-    )
+    search_engine.collect_for_keyword(_FakeConn(), run_id=1, fixed_keyword={"id": 1, "keyword": "에이전트 도입"})
 
-    assert calls == [1, 11]
-    assert result["fetched"] == 20
-    assert result["inserted"] == 20
+    assert calls == search_engine.SITE_DOMAINS
+
+
+def test_collect_for_keyword_stores_only_allowed_urls(monkeypatch):
+    """Tavily가 도메인은 맞혀도 화이트리스트 경로 밖의 URL(예: techmeme.com/river)을
+    돌려주면 저장 단계에서 다시 걸러져야 한다(이중 강제)."""
+    def fake_fetch(keyword, domain):
+        if domain == "techmeme.com":
+            return [_item("https://www.techmeme.com/260813/p1"), _item("https://www.techmeme.com/river")]
+        return []
+
+    monkeypatch.setattr(search_engine, "_fetch_site_results", fake_fetch)
+
+    result = search_engine.collect_for_keyword(_FakeConn(), run_id=1, fixed_keyword={"id": 1, "keyword": "교육"})
+
+    assert result["fetched"] == 2  # Tavily가 준 원본 개수
+    assert result["inserted"] == 1  # 화이트리스트 통과한 것만 저장
     assert result["error"] is None
 
 
-def test_collect_for_keyword_stops_on_empty_page_without_error(monkeypatch):
-    """dateRestrict=w1 범위 안에서 결과가 목표 건수보다 먼저 소진되면 정상 종료(에러 아님)."""
-    pages = [{"items": [_item("https://example.com/1")]}, {"items": []}]
-    calls = []
+def test_collect_for_keyword_dedups_same_url_across_sites(monkeypatch):
+    def fake_fetch(keyword, domain):
+        return [_item("https://techcrunch.com/2026/08/13/story/")]
 
-    def fake_fetch_page(keyword, start):
-        calls.append(start)
-        return pages[len(calls) - 1]
+    monkeypatch.setattr(search_engine, "_fetch_site_results", fake_fetch)
 
-    monkeypatch.setattr(search_engine, "_fetch_page", fake_fetch_page)
-    monkeypatch.setattr(search_engine.time, "sleep", lambda s: None)
+    result = search_engine.collect_for_keyword(_FakeConn(), run_id=1, fixed_keyword={"id": 1, "keyword": "교육"})
 
-    result = search_engine.collect_for_keyword(
-        _FakeConn(), run_id=1, fixed_keyword={"id": 1, "keyword": "AX 시장"}, target_count=50,
-    )
-
-    assert result["fetched"] == 1
-    assert result["inserted"] == 1
-    assert result["error"] is None
-
-
-def test_collect_for_keyword_dedups_same_url_within_run(monkeypatch):
-    """검색결과에 같은 URL이 중복으로 잡혀도 inserted는 1건만 세야 한다."""
-    pages = [
-        {"items": [_item("https://example.com/dup"), _item("https://example.com/dup")]},
-        {"items": []},  # 다음 페이지부터는 결과 없음 — 목표 건수(10) 미달이어도 정상 종료
-    ]
-    calls = []
-
-    def fake_fetch_page(keyword, start):
-        calls.append(start)
-        return pages[len(calls) - 1]
-
-    monkeypatch.setattr(search_engine, "_fetch_page", fake_fetch_page)
-    monkeypatch.setattr(search_engine.time, "sleep", lambda s: None)
-
-    result = search_engine.collect_for_keyword(
-        _FakeConn(), run_id=1, fixed_keyword={"id": 1, "keyword": "AX 시장"}, target_count=10,
-    )
-
-    assert result["fetched"] == 2
+    # 6개 사이트 전부 같은 URL을 돌려줘도(스텁이라 실제로는 안 그러겠지만) 1건만 저장돼야 함
     assert result["inserted"] == 1
 
 
 def test_collect_for_keyword_returns_error_on_http_failure(monkeypatch):
-    """네트워크 실패는 예외를 던지지 않고 error 필드로 보고해야 한다(파이프라인 격리)."""
-
-    def fake_fetch_page(keyword, start):
+    """한 사이트 호출이 실패해도 예외를 던지지 않고 error 필드로 보고해야 한다(파이프라인 격리)."""
+    def fake_fetch(keyword, domain):
         raise httpx.HTTPError("boom")
 
-    monkeypatch.setattr(search_engine, "_fetch_page", fake_fetch_page)
+    monkeypatch.setattr(search_engine, "_fetch_site_results", fake_fetch)
 
-    result = search_engine.collect_for_keyword(
-        _FakeConn(), run_id=1, fixed_keyword={"id": 1, "keyword": "AX 시장"}, target_count=10,
-    )
+    result = search_engine.collect_for_keyword(_FakeConn(), run_id=1, fixed_keyword={"id": 1, "keyword": "교육"})
 
     assert result["error"] == "boom"
     assert result["fetched"] == 0
     assert result["inserted"] == 0
 
 
-def test_search_once_returns_items(monkeypatch):
-    monkeypatch.setattr(search_engine.settings, "google_search_api_key", "key")
-    monkeypatch.setattr(search_engine.settings, "google_search_cx", "cx")
+# ---- search_once ----
 
-    class _FakeResponse:
-        def raise_for_status(self):
-            pass
+def test_search_once_returns_only_allowed_urls(monkeypatch):
+    monkeypatch.setattr(search_engine.settings, "tavily_api_key", "key")
 
-        def json(self):
-            return {"items": [_item("https://example.com/a")]}
+    def fake_request(payload):
+        return {"results": [
+            _item("https://techcrunch.com/2026/08/13/story/"),
+            _item("https://www.techmeme.com/river"),  # 제외 패턴 — 걸러져야 함
+        ]}
 
-    monkeypatch.setattr(search_engine.httpx, "get", lambda url, params, timeout: _FakeResponse())
+    monkeypatch.setattr(search_engine, "_tavily_request", fake_request)
 
     results = search_engine.search_once("AX 시장")
 
     assert len(results) == 1
-    assert results[0]["link"] == "https://example.com/a"
+    assert results[0]["url"] == "https://techcrunch.com/2026/08/13/story/"
 
 
 def test_search_once_returns_empty_list_without_credentials(monkeypatch):
-    monkeypatch.setattr(search_engine.settings, "google_search_api_key", None)
-    monkeypatch.setattr(search_engine.settings, "google_search_cx", None)
-
+    monkeypatch.setattr(search_engine.settings, "tavily_api_key", None)
     assert search_engine.search_once("AX 시장") == []
 
 
 def test_search_once_returns_empty_list_on_http_error(monkeypatch):
-    monkeypatch.setattr(search_engine.settings, "google_search_api_key", "key")
-    monkeypatch.setattr(search_engine.settings, "google_search_cx", "cx")
+    monkeypatch.setattr(search_engine.settings, "tavily_api_key", "key")
 
-    def fake_get(url, params, timeout):
+    def fake_request(payload):
         raise httpx.HTTPError("boom")
 
-    monkeypatch.setattr(search_engine.httpx, "get", fake_get)
+    monkeypatch.setattr(search_engine, "_tavily_request", fake_request)
 
     assert search_engine.search_once("AX 시장") == []
 
 
 def test_collect_all_reports_missing_credentials(monkeypatch):
-    monkeypatch.setattr(search_engine.settings, "google_search_api_key", None)
-    monkeypatch.setattr(search_engine.settings, "google_search_cx", None)
+    monkeypatch.setattr(search_engine.settings, "tavily_api_key", None)
 
     results = search_engine.collect_all(run_id=1)
 
     assert len(results) == 1
-    assert "GOOGLE_SEARCH_API_KEY" in results[0]["error"]
+    assert "TAVILY_API_KEY" in results[0]["error"]

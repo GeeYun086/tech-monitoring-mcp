@@ -65,7 +65,7 @@ def _render_search_box() -> None:
         return
     results = search_once(query)
     if not results:
-        st.info("검색 결과가 없거나 검색 설정(GOOGLE_SEARCH_API_KEY/GOOGLE_SEARCH_CX)이 비어 있습니다.")
+        st.info("검색 결과가 없거나 검색 설정(TAVILY_API_KEY)이 비어 있습니다.")
         return
     for item in results:
         st.markdown(
