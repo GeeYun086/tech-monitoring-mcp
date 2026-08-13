@@ -24,7 +24,7 @@ import re
 
 from tech_monitoring.db.connection import get_connection
 from tech_monitoring.db.weekly_run import get_active_fixed_keywords
-from tech_monitoring.utils.keyword_text import count_keywords, phrase_candidates, tfidf_rank
+from tech_monitoring.utils.keyword_text import count_keywords, phrase_candidates, tfidf_rank, tokens
 
 _HANGUL_RE = re.compile(r"[가-힣]")
 _ASCII_LETTER_RE = re.compile(r"[A-Za-z]")
@@ -59,6 +59,20 @@ def fetch_search_results(conn, run_id: int, fixed_keyword_id: int) -> list[dict]
         )
         columns = [c.name for c in cur.description]
         return [dict(zip(columns, row)) for row in cur.fetchall()]
+
+
+def build_term_sets(rows: list[dict]) -> list[set[str]]:
+    """문서(기사) 하나당 term 집합 하나(순서 보존) — extract_candidates와 같은
+    한글/영문 라우팅 기준(_is_korean_heavy)을 쓴다: 한글 우세 문서는 유니그램
+    (tokens), 그 외는 구 후보(phrase_candidates). analysis/keyword_merge.py가
+    이 리스트를 순회하며 "동의어 그룹의 변형 중 하나라도 포함하는 문서 수"를
+    합집합으로 세는 데 쓴다(단순 합산이 아님 — 한 문서가 여러 변형을 동시에
+    포함할 수 있어서)."""
+    term_sets = []
+    for row in rows:
+        text = _article_text(row)
+        term_sets.append(tokens(text) if _is_korean_heavy(text) else phrase_candidates(text))
+    return term_sets
 
 
 def extract_candidates(rows: list[dict], top_n: int = CANDIDATES_PER_BUCKET) -> list[dict]:

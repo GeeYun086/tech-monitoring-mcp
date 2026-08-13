@@ -15,6 +15,7 @@ dependencies = [
     "sentence-transformers>=3.0",
     "numpy>=1.26",
     "fastmcp>=3.0",
+    "google-genai>=1.0",
 ]
 
 [project.optional-dependencies]
