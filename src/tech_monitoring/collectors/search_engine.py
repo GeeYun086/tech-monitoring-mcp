@@ -40,6 +40,29 @@ MAX_START_INDEX = 91  # API 제약: start는 1~91까지만 허용(최대 100건 
 _PAGE_INTERVAL_SECONDS = 0.2
 
 
+def search_once(query: str, num: int = 10) -> list[dict]:
+    """대시보드 검색창(사용자 직접 검색) 전용 — search_results 테이블에 저장하지
+    않고 요청마다 라이브로 호출한다(무료 한도 절약). 주간 배치(_fetch_page)와
+    달리 dateRestrict를 안 건다 — 사용자가 명시적으로 검색한 것이므로 "이번
+    주"로 좁힐 이유가 없고, 큐레이션 검색엔진 전체 인덱스에서 찾는 게 맞다.
+    자격증명 미설정·네트워크 오류는 빈 목록으로 조용히 처리한다(대시보드가
+    죽으면 안 됨 — 화면에 "결과 없음"으로만 보인다)."""
+    if not settings.google_search_api_key or not settings.google_search_cx:
+        return []
+    params = {
+        "key": settings.google_search_api_key,
+        "cx": settings.google_search_cx,
+        "q": query,
+        "num": min(max(num, 1), RESULTS_PER_PAGE),
+    }
+    try:
+        resp = httpx.get(SEARCH_URL, params=params, timeout=15)
+        resp.raise_for_status()
+    except httpx.HTTPError:
+        return []
+    return resp.json().get("items", [])
+
+
 def _fetch_page(keyword: str, start: int) -> dict:
     params = {
         "key": settings.google_search_api_key,

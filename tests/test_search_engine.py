@@ -135,6 +135,44 @@ def test_collect_for_keyword_returns_error_on_http_failure(monkeypatch):
     assert result["inserted"] == 0
 
 
+def test_search_once_returns_items(monkeypatch):
+    monkeypatch.setattr(search_engine.settings, "google_search_api_key", "key")
+    monkeypatch.setattr(search_engine.settings, "google_search_cx", "cx")
+
+    class _FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"items": [_item("https://example.com/a")]}
+
+    monkeypatch.setattr(search_engine.httpx, "get", lambda url, params, timeout: _FakeResponse())
+
+    results = search_engine.search_once("AX 시장")
+
+    assert len(results) == 1
+    assert results[0]["link"] == "https://example.com/a"
+
+
+def test_search_once_returns_empty_list_without_credentials(monkeypatch):
+    monkeypatch.setattr(search_engine.settings, "google_search_api_key", None)
+    monkeypatch.setattr(search_engine.settings, "google_search_cx", None)
+
+    assert search_engine.search_once("AX 시장") == []
+
+
+def test_search_once_returns_empty_list_on_http_error(monkeypatch):
+    monkeypatch.setattr(search_engine.settings, "google_search_api_key", "key")
+    monkeypatch.setattr(search_engine.settings, "google_search_cx", "cx")
+
+    def fake_get(url, params, timeout):
+        raise httpx.HTTPError("boom")
+
+    monkeypatch.setattr(search_engine.httpx, "get", fake_get)
+
+    assert search_engine.search_once("AX 시장") == []
+
+
 def test_collect_all_reports_missing_credentials(monkeypatch):
     monkeypatch.setattr(search_engine.settings, "google_search_api_key", None)
     monkeypatch.setattr(search_engine.settings, "google_search_cx", None)
