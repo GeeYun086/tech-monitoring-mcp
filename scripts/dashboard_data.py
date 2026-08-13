@@ -66,8 +66,6 @@ MCP 응답은 Claude 컨텍스트에 그대로 들어가므로 크기를 계속 
 
 import argparse
 import json
-import math
-import re
 import sys
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -76,6 +74,13 @@ from tech_monitoring.config import settings
 from tech_monitoring.db.connection import get_connection
 from tech_monitoring.filters.stage5_cluster import _distinctive_tokens
 from tech_monitoring.mcp_server import queries
+from tech_monitoring.utils.keyword_text import (
+    clean_for_keywords as _clean_for_keywords,
+    count_keywords as _count_keywords,
+    phrase_candidates as _phrase_candidates,
+    tfidf_rank as _tfidf_rank,
+    tokens as _tokens,
+)
 
 # sources 테이블에 실제 등록된 국내 소스 이름 그대로(2026-08-11 기준).
 # 새 국내 소스를 추가하면 여기도 같이 갱신해야 한다 — 언어 자동 감지가
@@ -85,131 +90,16 @@ DOMESTIC_SOURCES = frozenset({
     "GeekNews", "GeekNews Weekly", "ZDNet Korea",
 })
 
-# 한국어는 조사·어미가 규칙 기반으로 안 걸러져서(형태소 분석기 없음)
-# 영어 불용어보다 더 대략적이다 — 뉴스 기사에 흔한 보도체 표현만 최소한으로 거른다.
-_KOREAN_STOPWORDS = {
-    "이번", "관련", "위해", "통해", "대한", "있다", "했다", "한다", "된다",
-    "것으로", "밝혔다", "전했다", "지난", "올해", "대해", "이라고", "라며",
-    "따르면", "이날", "가운데", "예정이다", "있는", "하는", "된", "등",
-    # 2026-08-11 확장: 급상승 키워드·버블차트·워드클라우드를 전체 데이터셋으로
-    # 돌려보니 "위한"·"실제"·"직접"·"새로운"·"기존"·"특히" 같은 순수 관형사·
-    # 부사가 마치 기술 트렌드인 것처럼 상위권을 차지했다 — 내용 있는 명사가
-    # 아니라 문장을 꾸미는 기능어일 뿐이다(위 영어 _STOPWORDS와 같은 성격).
-    "위한", "실제", "직접", "새로운", "기존", "특히", "최근", "넘어",
-    "아니라", "주요", "기반", "것이", "같은",
-    # 형태소 분석 없이 정규식 토큰화만 해서 "AI"에 조사가 붙은 채로 별도
-    # 단어처럼 집계되는 문제(README/SKILL.md에 기록된 알려진 한계)가
-    # 특히 자주 나오는 조합 몇 개는 직접 걸러낸다 — 일반적인 조사 분리
-    # 해법은 아니고(형태소 분석기가 필요), "AI" 특정 사례만 임시 대응.
-    "AI가", "AI는", "AI를", "AI도", "AI와", "AI의", "AI에",
-}
-
-# 흔한 영어 기능어만 거른다 — 도메인 키워드를 임의로 편집하지 않기 위해
-# 최소한으로 유지한다(이 목록이 길어지면 사실상 키워드 필터가 되어버린다).
-# 여기 있는 건 전부 대명사·전치사·조동사 같은 순수 문법 기능어다 — 특정
-# 주제를 배제하는 게 아니라 "내용이 없는 단어"만 거르는 것이라 관련도
-# 필터와는 성격이 다르다.
-# 2026-08-11 확장: 전체 데이터셋(142건)으로 돌려보니 "we"·"they"·"their"·
-# "through" 같은 대명사·전치사가 상위권에 섞여 나왔다 — 클러스터 대표
-# 요약(짧음)만 보던 이전 버전에서는 안 드러났던 문제.
-_STOPWORDS = {
-    "the", "a", "an", "and", "or", "but", "of", "to", "in", "on", "for",
-    "with", "at", "by", "from", "up", "about", "into", "over", "after",
-    "is", "are", "was", "were", "be", "been", "being", "as", "it", "its",
-    "this", "that", "these", "those", "has", "have", "had", "will", "would",
-    "can", "could", "not", "no", "than", "then", "so", "if", "how", "what",
-    "who", "which", "new", "says", "said", "more", "out", "now", "just",
-    "we", "they", "their", "them", "our", "your", "you", "he", "she", "his",
-    "her", "there", "here", "when", "where", "why", "all", "also", "some",
-    "any", "each", "other", "such", "most", "many", "much", "through",
-    "across", "first", "one", "two", "three", "get", "gets", "getting",
-    "make", "makes", "making", "like", "still", "even", "while", "using",
-    "use", "used",
-    # 2026-08-11 3차 확장: 구(phrase)+TF-IDF로 해외 워드클라우드를 다시
-    # 돌려보니, arXiv 논문 초록에 흔한 서술체 표현("we show that...",
-    # "however, ...", "results demonstrate...")이 중간 빈도 우대 특성과
-    # 만나 상위권을 차지했다 — 내용 있는 명사가 아니라 논문 특유의
-    # 문장 골격일 뿐이다. "paper"도 소스 자체가 arXiv 위주라(전체
-    # 해외 기사의 상당수) 주제어가 아니라 포맷 명칭에 가까워 함께 제외한다.
-    "however", "show", "shows", "shown", "showed", "demonstrate",
-    "demonstrates", "demonstrated", "appear", "appears", "appeared",
-    "remain", "remains", "remained", "under", "only", "paper", "papers",
-}
-_WORD_RE = re.compile(r"[A-Za-z가-힣][A-Za-z가-힣'\-]{1,}")
-_URL_RE = re.compile(r"https?://\S+")
-# hnrss처럼 본문이 없는 소스는 summary가 "Article URL: ... Comments URL: ...
-# Points: N # Comments: M" 같은 구조적 메타데이터뿐이다(rss.py의 parse_hn_points가
-# 파싱해 impact_signals.hn_points로 이미 뽑아간 바로 그 텍스트). 이건 기사 내용이
-# 아니라 라벨이므로 키워드 후보에서 제외한다 — 안 그러면 "URL"·"Comments"·
-# "Points" 같은 게 실제 주제어 자리를 차지한다(실측: 상위 10개 중 8개가 이거였음).
-_HN_METADATA_RE = re.compile(
-    r"Article URL:|Comments URL:|Points:\s*\d+|#\s*Comments:\s*\d+", re.IGNORECASE
-)
-
-
-def _clean_for_keywords(text: str) -> str:
-    text = _URL_RE.sub(" ", text)
-    text = _HN_METADATA_RE.sub(" ", text)
-    return text
+# 불용어 목록·구 후보 생성·TF-IDF 랭킹은 tech_monitoring.utils.keyword_text로
+# 뽑아냈다(2026-08-13, v2 피벗 중 — analysis/keyword_extraction.py도 같은
+# 로직이 필요해서 공유 유틸로 분리). 여기 남은 건 v1(articles 스키마)에만
+# 해당하는 것들 — 국내/해외 소스 분류, article dict → 텍스트 추출.
 
 
 def classify_region(source: str) -> str:
     """소스 이름 → 'domestic'(국내) 또는 'global'(해외). 언어 자동 감지가
     아니라 DOMESTIC_SOURCES에 실제로 등록한 소스 목록 기반이다."""
     return "domestic" if source in DOMESTIC_SOURCES else "global"
-
-
-def _filtered_words(text: str) -> list[str]:
-    """불용어·URL·HN 메타데이터를 걸러낸 단어를 원문 순서 그대로 나열한다
-    (중복 제거 안 함 — n-gram을 만들려면 인접 관계가 필요하다). _tokens()와
-    _phrase_candidates()가 이 함수 하나를 공유한다 — "무엇을 단어로 볼지"에
-    대한 판단이 여러 곳에 흩어지면 필터 기준이 은근슬쩍 갈라진다."""
-    cleaned = _clean_for_keywords(text)
-    words: list[str] = []
-    for raw_match in _WORD_RE.findall(cleaned):
-        # _WORD_RE가 아포스트로피·하이픈을 단어 중간 문자로 허용해서, "AI's"
-        # 뒤에 온점·따옴표가 곧장 붙으면 "AI'"처럼 꼬리에 구두점만 남은 조각이
-        # 매치될 수 있다(실사용 중 발견: 국내/해외 갭 분석에 "AI'"가 그대로
-        # 노출됐다). 앞뒤 아포스트로피·하이픈은 잘라내고 판단한다.
-        match = raw_match.strip("'-")
-        if not match:
-            continue
-        lower = match.lower()
-        if lower in _STOPWORDS or match in _KOREAN_STOPWORDS or len(lower) < 2:
-            continue
-        words.append(match)
-    return words
-
-
-def _tokens(text: str) -> set[str]:
-    """텍스트 한 건에서 걸러진 단어의 집합(중복 제거, 유니그램만). 동시출현
-    네트워크·버블차트·갭 분석·엔티티 랭킹처럼 "단어 하나" 단위가 맞는
-    지표는 계속 이 함수를 쓴다(2026-08-11 3차 확장에서 워드클라우드·급상승
-    키워드만 구 단위 `_phrase_candidates()`로 옮겼다 — 아래 참고)."""
-    return set(_filtered_words(text))
-
-
-# 2026-08-11 3차 확장: 담당자 지적 — 단어 하나 단위로만 세면 "AI"·"모델"
-# 같은 최상위 개념어가 항상 1위를 차지해서 "생성형 AI"·"비용 절감"처럼
-# 실제로 구체적인 표현은 절대 드러나지 않는다. 불용어를 먼저 제거한 뒤
-# 남은 단어를 이어붙여 1~2단어짜리 구(phrase)까지 후보로 넓힌다.
-# 3단어 이상은 기사마다 표현이 제각각이라(재사용도가 낮아) 대부분
-# "여러 기사에 걸쳐 뜨는 화제"를 찾는 이 지표엔 노이즈에 가까워 2단어까지만 쓴다.
-_PHRASE_MAX_N = 2
-
-
-def _phrase_candidates(text: str, max_n: int = _PHRASE_MAX_N) -> set[str]:
-    """유니그램에 더해 1~max_n개짜리 연속 구(phrase)까지 후보로 만든다
-    (기사 한 건 안 중복은 한 번만 — _tokens()와 같은 원칙). 원문에서
-    불용어가 중간에 끼어 있어도(예: "AI 이번 모델") 불용어를 먼저 걷어낸
-    뒤 이어붙이므로 "AI 모델"이 바이그램으로 잡힌다 — 원문에서 안 붙어
-    있어도 의미상 이어지는 표현을 구로 묶기 위한 의도적 설계다."""
-    words = _filtered_words(text)
-    candidates: set[str] = set()
-    for n in range(1, max_n + 1):
-        for i in range(len(words) - n + 1):
-            candidates.add(" ".join(words[i:i + n]))
-    return candidates
 
 
 def _article_text(article: dict) -> str:
@@ -225,54 +115,6 @@ def _article_text(article: dict) -> str:
     (2-2절 참고). summary는 짧아 구체적 표현이 덜 담기는 대신 상대적으로
     깨끗하다는 트레이드오프가 있고, 지금은 깨끗한 쪽을 택한다."""
     return f"{article.get('title') or ''} {article.get('summary') or ''}"
-
-
-def _count_keywords(texts: list[str], top_n: int) -> list[dict]:
-    """텍스트 목록에서 빈도 상위 단어를 뽑는다. 텍스트 하나(기사 한 건 또는
-    클러스터 대표 기사 한 건) 안에서 같은 단어가 여러 번 나와도 한 번만
-    센다 — 긴 글 하나가 빈도수를 독점하지 않게."""
-    counter: Counter[str] = Counter()
-    for text in texts:
-        counter.update(_tokens(text))
-    return [{"word": word, "count": count} for word, count in counter.most_common(top_n)]
-
-
-def _tfidf_rank(term_sets: list[set[str]], top_n: int) -> list[dict]:
-    """로그 감쇠 TF(sublinear TF) × IDF(문서빈도 기반 희소성 가중치)로
-    순위를 매긴다. term_sets는 문서(기사) 하나당 등장한 term의 집합 목록 —
-    이미 문서 내 중복은 제거된 상태라고 가정한다(_tokens/_phrase_candidates가
-    그렇게 만듦).
-
-    **주의 — 처음 짠 공식(`count × idf`)은 검증 결과 틀렸다.** term_sets가
-    문서당 집합이라 tf(전체 등장 횟수)와 df(등장 문서 수)가 항상 같은
-    값이 된다. 그러면 `count × idf`는 사실상 `df × idf`가 되는데, idf는
-    로그 스케일로만 줄어드는 반면 df는 선형으로 커서, df=84("AI") 같은
-    항목이 df=13("AX") 같은 구체적인 항목보다 **여전히 압도적으로 높은
-    점수**를 받았다(실측: score(AI)=104 vs score(AX)=40, N=107 기준).
-    즉 예전 하드코딩 제외 방식보다 나아진 게 없었다.
-
-    수정: TF에 로그 감쇠(`1 + ln(count)`, sublinear TF — 검색엔진 랭킹에서
-    쓰는 표준 기법)를 적용해 빈도의 영향력을 압축했다. 이러면 점수가
-    "적당히 자주 나오지만 모든 문서에 있진 않은" 중간 대역(실측 데이터
-    기준 count≈13~15 부근)에서 최고점을 찍고, 아주 흔한 단어(count=84)와
-    아주 드문 단어(count=1~2) 양쪽 다 하위권으로 밀린다 — 원하던 "특정
-    화제가 최상위 개념어보다 위로 오게" 하는 동작이 실제로 나온다."""
-    n_docs = len(term_sets) or 1
-    tf: Counter[str] = Counter()
-    df: Counter[str] = Counter()
-    for terms in term_sets:
-        tf.update(terms)
-        df.update(terms)  # terms가 이미 set이므로 문서당 1회만 반영됨
-    scored = []
-    for term, count in tf.items():
-        idf = math.log((n_docs + 1) / (df[term] + 1)) + 1
-        tf_weight = 1 + math.log(count) if count > 0 else 0.0
-        scored.append({
-            "word": term, "count": count, "doc_freq": df[term],
-            "score": round(tf_weight * idf, 2),
-        })
-    scored.sort(key=lambda r: -r["score"])
-    return scored[:top_n]
 
 
 def _weights() -> dict[str, float]:
