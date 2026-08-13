@@ -1,20 +1,14 @@
 [project]
 name = "tech-monitoring-mcp"
-version = "0.1.0"
-description = "산업/경쟁사 동향 센싱 & 통합 MCP"
+version = "0.2.0"
+description = "AX 시장 모니터링 — 큐레이션 검색엔진 + 구글 검색 API + Gemini 동의어 병합"
 requires-python = ">=3.12"
 dependencies = [
     "psycopg[binary]>=3.2",
-    "pgvector>=0.3",
     "python-dotenv>=1.0",
     "pydantic>=2.8",
     "pydantic-settings>=2.4",
-    "feedparser>=6.0",
     "httpx>=0.27",
-    "trafilatura>=1.12",
-    "sentence-transformers>=3.0",
-    "numpy>=1.26",
-    "fastmcp>=3.0",
     "google-genai>=1.0",
 ]
 
