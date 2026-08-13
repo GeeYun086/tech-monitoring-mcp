@@ -1,9 +1,3 @@
 {
-  "mcpServers": {
-    "tech-monitoring": {
-      "type": "stdio",
-      "command": ".venv/Scripts/python.exe",
-      "args": ["-m", "tech_monitoring.mcp_server"]
-    }
-  }
+  "mcpServers": {}
 }
