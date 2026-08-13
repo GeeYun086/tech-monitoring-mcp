@@ -8,6 +8,23 @@ class Settings(BaseSettings):
     naver_client_id: str | None = None
     naver_client_secret: str | None = None
 
+    # v2(검색엔진+Gemini 동의어 병합, 2026-08-13 피벗) 설정.
+    # 사용자가 직접 구성한 Custom Search Engine(cx) — 화이트리스트 사이트만
+    # 검색되므로 관련도 필터링이 따로 필요 없다(아래 google_search_cx가 그 cx).
+    google_search_api_key: str | None = None
+    google_search_cx: str | None = None
+    # Custom Search API 공식 파라미터(비공식 스크래핑 아님). "w1" = 지난 1주일.
+    google_search_date_restrict: str = "w1"
+    # 고정 키워드 하나당 목표 수집 건수. top20처럼 인위적으로 자르지 않고
+    # 넓게 모아서 이후 단계(TF-IDF+Gemini 동의어 병합)가 주요 키워드를 골라내게 한다.
+    search_results_per_keyword: int = 50
+    gemini_api_key: str | None = None
+    gemini_model: str = "gemini-2.0-flash"  # 무료 티어
+
+    # ---- 아래부터 v1(RSS 수집 + 룰/임베딩 기반 필터링, db/migrations_v1_archive/) 전용.
+    # v2 파이프라인(collectors/search_engine.py 등)은 이 파라미터들을 참조하지 않는다.
+    # filters/·collectors/rss.py 삭제 시 이 블록도 함께 정리할 것.
+
     # 필터 튜닝 파라미터 — AX 실데이터 라벨링으로 정밀도 측정 후 조정(설계서 v2.0 §11)
     relevance_cosine_threshold: float = 0.35  # Stage2 τ (AX 시장 관련도)
     # Stage5 이슈 클러스터링 임계값. 2026-08-10: 라벨 없이 0.60~0.85 구간을
