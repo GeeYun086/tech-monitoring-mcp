@@ -206,12 +206,41 @@ def test_run_for_all_keywords_covers_every_active_keyword(monkeypatch):
     monkeypatch.setattr(km, "get_active_fixed_keywords", lambda conn: [
         {"id": 1, "keyword": "AX 시장"}, {"id": 2, "keyword": "생성형 AI"},
     ])
-    monkeypatch.setattr(km, "merge_candidates_for_keyword", lambda conn, run_id, kw: [
+    monkeypatch.setattr(km, "fetch_search_results", lambda conn, run_id, kw_id: [])
+    monkeypatch.setattr(km, "merge_candidates_for_keyword", lambda conn, run_id, kw, rows=None: [
         {"canonical_phrase": f"kw-{kw['id']}", "variant_phrases": [f"kw-{kw['id']}"], "doc_count": 1, "tfidf_score": None},
     ])
-    monkeypatch.setattr(km, "_save_market_keywords", lambda conn, run_id, fixed_keyword_id, merged: len(merged))
+    monkeypatch.setattr(
+        km, "_save_market_keywords",
+        lambda conn, run_id, fixed_keyword_id, merged, pipeline="search_engine": len(merged),
+    )
 
     results = km.run_for_all_keywords(conn=None, run_id=1)
 
     assert [r["fixed_keyword"] for r in results] == ["AX 시장", "생성형 AI"]
     assert all(r["groups"] == 1 and r["inserted"] == 1 for r in results)
+
+
+def test_run_for_all_keywords_supports_custom_fetch_rows_and_pipeline_tag(monkeypatch):
+    """v3(analysis/relevance_filter.py)가 이 함수를 그대로 재사용하기 위한 확장
+    지점 — fetch_rows를 다른 걸 넘기면 그걸로 rows를 가져오고, pipeline 태그가
+    _save_market_keywords까지 그대로 전달돼야 한다."""
+    monkeypatch.setattr(km, "get_active_fixed_keywords", lambda conn: [{"id": 1, "keyword": "AX 시장"}])
+    monkeypatch.setattr(km, "merge_candidates_for_keyword", lambda conn, run_id, kw, rows=None: (
+        [{"canonical_phrase": "x", "variant_phrases": ["x"], "doc_count": 1, "tfidf_score": None}]
+        if rows == ["fake-row"] else []
+    ))
+    saved_pipelines = []
+    monkeypatch.setattr(
+        km, "_save_market_keywords",
+        lambda conn, run_id, fixed_keyword_id, merged, pipeline="search_engine": (
+            saved_pipelines.append(pipeline) or len(merged)
+        ),
+    )
+
+    results = km.run_for_all_keywords(
+        conn=None, run_id=1, pipeline="rss_llm", fetch_rows=lambda conn, run_id, kw_id: ["fake-row"],
+    )
+
+    assert results[0]["groups"] == 1
+    assert saved_pipelines == ["rss_llm"]
