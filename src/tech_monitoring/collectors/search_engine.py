@@ -35,6 +35,7 @@ Tavily는 페이지네이션이 없고 한 호출당 max_results가 최대 20건
 """
 
 import fnmatch
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit
 
 import httpx
@@ -129,6 +130,20 @@ def _extract_domain(url: str) -> str:
     return urlsplit(url).netloc
 
 
+def _parse_published_date(value: str | None):
+    """Tavily가 주는 published_date는 RFC 2822 형식 문자열
+    (예: "Tue, 11 Aug 2026 16:25:20 GMT") — 2026-08-13 실제 응답으로 확인.
+    공식 문서엔 이 필드 언급이 없어 형식이 사이트마다 다르거나 아예 빠질 수
+    있으니, 파싱 실패 시 예외를 던지지 않고 None으로 폴백한다(정렬 참고값일
+    뿐 필수 데이터가 아님)."""
+    if not value:
+        return None
+    try:
+        return parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _tavily_request(payload: dict) -> dict:
     resp = httpx.post(
         TAVILY_SEARCH_URL,
@@ -191,7 +206,7 @@ def _insert_result(conn, *, run_id: int, fixed_keyword_id: int, query: str, rank
                 normalize_url(url),
                 _extract_domain(url),
                 item.get("content"),
-                None,  # Tavily 응답엔 발행일 필드가 없음(공식 문서 확인) — 정렬 참고값 없어도 지장 없음
+                _parse_published_date(item.get("published_date")),
             ),
         )
         return cur.fetchone() is not None

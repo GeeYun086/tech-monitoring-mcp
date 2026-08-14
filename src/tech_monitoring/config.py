@@ -16,7 +16,11 @@ class Settings(BaseSettings):
     tavily_time_range: str = "week"
 
     gemini_api_key: str | None = None
-    gemini_model: str = "gemini-2.0-flash"  # 무료 티어
+    # "gemini-2.0-flash"로 고정해뒀다가 2026-08-13 실전 파이프라인 실행 중
+    # 404("model ... is no longer available")로 발견 — 버전 고정 모델은
+    # Google이 예고 없이 은퇴시킬 수 있다. "-latest" 별칭은 Google이 항상
+    # 현재 권장 flash 모델로 갱신해주므로 같은 문제가 재발하지 않는다.
+    gemini_model: str = "gemini-flash-latest"  # 무료 티어
 
 
 settings = Settings()

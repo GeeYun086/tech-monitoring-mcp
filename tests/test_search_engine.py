@@ -1,6 +1,8 @@
 """검색엔진 수집기(collectors/search_engine.py, Tavily 기반) 테스트.
 실제 네트워크·DB 없이 _fetch_site_results와 conn.cursor()를 스텁으로 대체한다."""
 
+from datetime import datetime, timezone
+
 import httpx
 import pytest
 
@@ -82,6 +84,18 @@ def test_is_allowed_url_accepts_include_patterns(url):
 ])
 def test_is_allowed_url_rejects_excluded_or_unlisted(url):
     assert search_engine.is_allowed_url(url) is False
+
+
+# ---- _parse_published_date: 2026-08-13 실제 Tavily 응답으로 확인한 RFC 2822 형식 ----
+
+def test_parse_published_date_parses_rfc2822():
+    result = search_engine._parse_published_date("Tue, 11 Aug 2026 16:25:20 GMT")
+    assert result == datetime(2026, 8, 11, 16, 25, 20, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize("value", [None, "", "이상한 형식"])
+def test_parse_published_date_falls_back_to_none(value):
+    assert search_engine._parse_published_date(value) is None
 
 
 # ---- collect_for_keyword ----
