@@ -24,9 +24,9 @@ from tech_monitoring.analysis.keyword_extraction import (
     extract_candidates,
     fetch_search_results,
 )
-from tech_monitoring.config import settings
 from tech_monitoring.db.connection import get_connection
 from tech_monitoring.db.weekly_run import get_active_fixed_keywords
+from tech_monitoring.llm_client import call_gemini_json
 
 _PROMPT_TEMPLATE = """다음은 "{fixed_keyword}" 시장 관련 이번 주 기사에서 뽑은 후보 키워드 목록이다.
 
@@ -53,18 +53,10 @@ def build_prompt(fixed_keyword: str, phrases: list[str]) -> str:
 
 
 def call_gemini(prompt: str) -> str:
-    """실제 Gemini 호출 — 테스트에서는 이 함수 전체를 monkeypatch로 대체한다
-    (google-genai SDK·네트워크·API 키에 의존하지 않게)."""
-    from google import genai
-    from google.genai import types
-
-    client = genai.Client(api_key=settings.gemini_api_key)
-    response = client.models.generate_content(
-        model=settings.gemini_model,
-        contents=prompt,
-        config=types.GenerateContentConfig(response_mime_type="application/json"),
-    )
-    return response.text
+    """llm_client.call_gemini_json의 얇은 wrapper — 테스트에서 이 이름
+    (keyword_merge.call_gemini)을 monkeypatch로 대체하는 기존 테스트와의
+    호환을 위해 그대로 남겨둔다(2026-08-13 llm_client.py로 실제 구현을 분리)."""
+    return call_gemini_json(prompt)
 
 
 def parse_and_validate_groups(raw_json: str, valid_phrases: set[str]) -> list[dict]:
@@ -133,9 +125,18 @@ def compute_merged_stats(
     }
 
 
-def merge_candidates_for_keyword(conn, run_id: int, fixed_keyword: dict) -> list[dict]:
-    """고정 키워드 하나에 대해 후보 추출 → Gemini 그룹핑 → 카운트 재계산까지 전부 수행."""
-    rows = fetch_search_results(conn, run_id, fixed_keyword["id"])
+def merge_candidates_for_keyword(
+    conn, run_id: int, fixed_keyword: dict, rows: list[dict] | None = None,
+) -> list[dict]:
+    """고정 키워드 하나에 대해 후보 추출 → Gemini 그룹핑 → 카운트 재계산까지 전부 수행.
+
+    rows를 안 넘기면 v2 기본 경로(search_results)에서 직접 가져온다. v3
+    (analysis/relevance_filter.py의 collected_articles + 관련도 판단 결과)
+    처럼 다른 원본에서 뽑은 행을 그대로 넘길 수도 있다 — title/snippet/
+    source_domain 모양만 맞으면 이 아래 로직(TF-IDF·Gemini 병합)은 원본이
+    무엇이든 동일하게 동작한다."""
+    if rows is None:
+        rows = fetch_search_results(conn, run_id, fixed_keyword["id"])
     candidates = extract_candidates(rows)
     if not candidates:
         return []
@@ -152,21 +153,23 @@ def merge_candidates_for_keyword(conn, run_id: int, fixed_keyword: dict) -> list
     return [compute_merged_stats(g, term_sets, candidates_by_phrase) for g in groups]
 
 
-def _save_market_keywords(conn, run_id: int, fixed_keyword_id: int, merged: list[dict]) -> int:
+def _save_market_keywords(
+    conn, run_id: int, fixed_keyword_id: int, merged: list[dict], pipeline: str = "search_engine",
+) -> int:
     inserted = 0
     with conn.cursor() as cur:
         for row in merged:
             cur.execute(
                 """
                 INSERT INTO market_keywords
-                    (run_id, fixed_keyword_id, canonical_phrase, variant_phrases, doc_count, tfidf_score)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                ON CONFLICT (run_id, fixed_keyword_id, canonical_phrase) DO NOTHING
+                    (run_id, fixed_keyword_id, canonical_phrase, variant_phrases, doc_count, tfidf_score, pipeline)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (run_id, fixed_keyword_id, canonical_phrase, pipeline) DO NOTHING
                 RETURNING id
                 """,
                 (
                     run_id, fixed_keyword_id, row["canonical_phrase"],
-                    row["variant_phrases"], row["doc_count"], row["tfidf_score"],
+                    row["variant_phrases"], row["doc_count"], row["tfidf_score"], pipeline,
                 ),
             )
             if cur.fetchone() is not None:
@@ -174,11 +177,24 @@ def _save_market_keywords(conn, run_id: int, fixed_keyword_id: int, merged: list
     return inserted
 
 
-def run_for_all_keywords(conn, run_id: int) -> list[dict]:
+def run_for_all_keywords(
+    conn, run_id: int, *, pipeline: str = "search_engine", fetch_rows=None,
+) -> list[dict]:
+    """pipeline/fetch_rows는 v3(analysis/relevance_filter.py)가 이 함수를
+    그대로 재사용하기 위한 확장 지점 — 기본값은 v2(search_results, pipeline
+    ='search_engine') 그대로라 기존 호출부(pipeline_v2.py)는 무변경으로
+    동작한다. fetch_rows 기본값을 함수 정의 시점 대신 호출 시점에 모듈
+    전역에서 다시 찾아온다 — 그래야 테스트의 monkeypatch(fetch_search_results
+    교체)가 실제로 적용된다(기본 인자는 def 시점에 한 번만 바인딩되는
+    파이썬 특성상, 함수 시그니처에 바로 fetch_search_results를 기본값으로
+    못 박으면 monkeypatch가 무시됨 — 실제로 겪은 문제)."""
+    if fetch_rows is None:
+        fetch_rows = fetch_search_results
     results = []
     for kw in get_active_fixed_keywords(conn):
-        merged = merge_candidates_for_keyword(conn, run_id, kw)
-        inserted = _save_market_keywords(conn, run_id, kw["id"], merged)
+        rows = fetch_rows(conn, run_id, kw["id"])
+        merged = merge_candidates_for_keyword(conn, run_id, kw, rows=rows)
+        inserted = _save_market_keywords(conn, run_id, kw["id"], merged, pipeline=pipeline)
         results.append({"fixed_keyword": kw["keyword"], "groups": len(merged), "inserted": inserted})
     return results
 
