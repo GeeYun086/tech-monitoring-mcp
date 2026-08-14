@@ -151,6 +151,32 @@ def test_merge_candidates_for_keyword_falls_back_to_singletons_on_gemini_failure
     ]
 
 
+def test_merge_candidates_for_keyword_falls_back_to_singletons_when_call_gemini_raises(monkeypatch):
+    """2026-08-13 실제로 겪은 사고 — call_gemini가 429(재시도 소진) 등으로
+    예외를 던지면 파이프라인 전체가 죽고 weekly_runs가 'running'에 멈춰있었다.
+    이제는 그 키워드만 동의어 병합 없이(단독 그룹으로) 진행해야 한다."""
+    fake_candidates = [
+        {"phrase": "OpenAI", "doc_count": 1, "tfidf_score": 1.0, "method": "tfidf"},
+        {"phrase": "Anthropic", "doc_count": 1, "tfidf_score": 0.9, "method": "tfidf"},
+    ]
+
+    monkeypatch.setattr(km, "fetch_search_results", lambda conn, run_id, kw_id: [{"title": "dummy"}])
+    monkeypatch.setattr(km, "extract_candidates", lambda rows: fake_candidates)
+    monkeypatch.setattr(km, "build_term_sets", lambda rows: [{"OpenAI"}, {"Anthropic"}])
+
+    def raise_rate_limit(prompt):
+        raise RuntimeError("429 재시도 소진(가정)")
+
+    monkeypatch.setattr(km, "call_gemini", raise_rate_limit)
+
+    result = km.merge_candidates_for_keyword(conn=None, run_id=1, fixed_keyword={"id": 1, "keyword": "AX 시장"})
+
+    by_canonical = {r["canonical_phrase"]: r for r in result}
+    assert set(by_canonical) == {"OpenAI", "Anthropic"}
+    assert by_canonical["OpenAI"]["variant_phrases"] == ["OpenAI"]  # 병합 안 됨 — 단독 그룹
+    assert by_canonical["OpenAI"]["doc_count"] == 1  # 코드가 이미 계산한 값은 그대로 보존
+
+
 # ---- _save_market_keywords / run_for_all_keywords (DB 저장 경로) ----
 
 class _FakeCursor:

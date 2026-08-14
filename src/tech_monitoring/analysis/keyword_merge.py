@@ -18,6 +18,7 @@ market_keywords 최종 테이블을 확정한다 — "이번 주 주요 키워�
 """
 
 import json
+import logging
 
 from tech_monitoring.analysis.keyword_extraction import (
     build_term_sets,
@@ -27,6 +28,8 @@ from tech_monitoring.analysis.keyword_extraction import (
 from tech_monitoring.db.connection import get_connection
 from tech_monitoring.db.weekly_run import get_active_fixed_keywords
 from tech_monitoring.llm_client import call_gemini_json
+
+logger = logging.getLogger("tech_monitoring.keyword_merge")
 
 _PROMPT_TEMPLATE = """다음은 "{fixed_keyword}" 시장 관련 이번 주 기사에서 뽑은 후보 키워드 목록이다.
 
@@ -146,8 +149,19 @@ def merge_candidates_for_keyword(
     term_sets = build_term_sets(rows)
 
     prompt = build_prompt(fixed_keyword["keyword"], all_phrases)
-    raw_response = call_gemini(prompt)
-    groups = parse_and_validate_groups(raw_response, valid_phrases=set(all_phrases))
+    try:
+        raw_response = call_gemini(prompt)
+        groups = parse_and_validate_groups(raw_response, valid_phrases=set(all_phrases))
+    except Exception:
+        # llm_client.call_gemini_json이 429를 재시도까지 다 쓰고도 못 풀거나
+        # (일일 한도 소진 등), 모델 접근 자체가 막힌 경우(404 등) — 재시도로
+        # 안 풀리는 실패다. 2026-08-13 실사용 중 이걸 못 잡아서 파이프라인
+        # 전체가 죽고 weekly_runs가 'running'에 멈춰있던 사고가 있었다.
+        # 동의어 병합만 포기하고(전부 단독 그룹) 코드가 이미 정확히 센
+        # doc_count는 그대로 살린다 — 이번 주 후보 목록 자체를 잃는 것보다
+        # 훨씬 낫다.
+        logger.warning("Gemini 호출 실패 — '%s' 키워드는 동의어 병합 없이 진행", fixed_keyword["keyword"], exc_info=True)
+        groups = []
     groups = add_ungrouped_singletons(groups, all_phrases)
 
     return [compute_merged_stats(g, term_sets, candidates_by_phrase) for g in groups]
