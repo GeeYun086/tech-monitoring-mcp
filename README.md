@@ -76,10 +76,13 @@ Streamlit UI가 생기기 전까지는 CLI로 관리한다.
 ./.venv/Scripts/python.exe -m tech_monitoring.pipeline_v2
 ```
 
-순서: (매주 데이터 wipe) → 이번 주 run 시작 → 검색엔진 수집(고정 키워드별)
-→ 키워드 후보추출 + Gemini 동의어 병합. 한 고정 키워드의 수집·병합이
-실패해도 다른 고정 키워드는 계속 진행되고, 실패한 단계는 반환값의
-`failed`에 남는다.
+순서: (매주 데이터 wipe) → 이번 주 run 시작 → **검색엔진 수집(사이트별 공용
+기사 풀, 006)** → **시장별 관련도 점수(분류기, 007 — 모델이 없으면 건너뜀)**
+→ 키워드 후보추출 + Gemini 동의어 병합. 한 사이트·키워드가 실패해도 나머지는
+계속 진행되고, 실패한 항목은 반환값의 `failed`에 남는다(항목별 `error`도
+실패로 집계한다 — 조용히 성공으로 마감되던 문제를 막기 위해).
+
+크레딧: 사이트 6개 × 넓은 질의 2개 = **주 12크레딧**(시장 수와 무관).
 
 개별 단계만 다시 돌리고 싶을 때:
 
@@ -133,8 +136,15 @@ v3 나란히 비교하려고 의도적으로 그렇게 만듦, `pipeline_v3.py` 
    "다음 주에도 통하는가"를 직접 재고, 한 주뿐이면 같은 기사가 학습·검증에
    갈리는 누수만 막는다.
 3. **적용** — `relevance_filter.judge_all`이 저장된 모델을 자동으로 집어 쓰고,
-   없으면 Gemini로 폴백한다. 어느 쪽으로 판단했는지는 결과의 `method`
-   (`classifier:tfidf` / `gemini`)에 남는다.
+   기사마다 확률을 `article_keyword_relevance.score`에 남긴다(007). 화면은 이
+   점수로 **정렬만** 하고 잘라내지 않는다 — 점수가 낮은 기사도 목록에 남는다
+   (분류기가 틀려서 기사가 사라지는 건 "Gemini가 막히면 그 주 0건"과 같은
+   종류의 사고다). 모델이 없으면 판단을 건너뛰고(`method`가
+   `skipped:모델 없음`) 화면은 최신순 전체를 보여준다 — 라벨이 없는 첫 주에
+   LLM을 부를 이유가 없고, 그 주 결과물은 사람이 라벨링한 것 자체가 된다.
+   Gemini 경로는 `allow_llm_fallback=True`로만 쓴다(비교 실험용).
+   성능 탭에서 모델을 저장하면 그 자리에서 이번 주 기사를 다시 채점해
+   시장 탭 순서가 바로 갱신된다(파이프라인 재실행 불필요).
 
 정확도는 **항상 "찍기 기준선"과 나란히** 본다 — 라벨이 한쪽으로 쏠리면
 "무조건 도움됨"이라고만 답하는 분류기도 정확도가 높게 나와 단독 수치는
@@ -163,16 +173,17 @@ DB 연결 실패(Supabase 무료 티어는 7일 미사용 시 자동 일시정�
 
 ## 스키마
 
-`db/migrations/001_market_keywords_schema.sql`(v2) +
-`002_v3_rss_llm_pipeline.sql`(v3, 아래 "v2 vs v3 비교 실험" 참고). 테이블 6개:
+마이그레이션은 `db/migrations/`에 001~007로 누적돼 있다(001 v2 · 002 v3 ·
+003 검색어 · 004 라벨 · 005 라벨 주체 · 006 공용 기사 풀 · 007 관련도 점수).
+테이블 7개:
 
 | 테이블 | 역할 | 매주 wipe? |
 | --- | --- | --- |
 | `fixed_keywords` | 사용자가 지정한 고정 키워드(모니터링 대상 시장) | 아니오 — 설정값 |
 | `weekly_runs` | 주간 배치 실행 메타. 다른 수집 테이블은 전부 이 테이블에 cascade 연결 | 예(wipe 트리거) |
-| `search_results` | v2: 검색엔진에서 가져온 이번 주 원본 기사(top20 고정 없음) | 예 |
-| `collected_articles` | v3: 재선정 사이트 4개에서 통째로 수집한 원본(고정 키워드 무관) | 예 |
-| `article_keyword_relevance` | v3: "이 글 ↔ 이 고정 키워드 관련도" 판단(다대다) | 예 |
+| `search_results` | 시장별 검색어로 수집하던 옛 경로 — 006부터 파이프라인이 쓰지 않는다(정밀도 보강용으로 보존) | 예 |
+| `collected_articles` | **이번 주 공용 기사 풀** — Tavily 넓은 질의(006)와 v3 수집기가 함께 쓴다. 시장과 분리해 기사당 한 행 | 예 |
+| `article_keyword_relevance` | "기사 × 시장" 판단(다대다). `score`에 분류기 확률을 남겨 화면 정렬에 쓴다(007) | 예 |
 | `article_labels` | 사람이 매긴 관련도 라벨(분류기 학습 데이터). `weekly_runs`를 참조하지 않고 원문을 스냅샷으로 복사해 둔다. `labeled_by`로 라벨 주체를 함께 남긴다(005) | **아니오 — 학습 자산** |
 | `market_keywords` | v2/v3 공용 — "이번 주 주요 키워드" 최종 목록. `pipeline` 컬럼(`search_engine`/`rss_llm`)으로 구분 | 예 |
 
@@ -235,7 +246,8 @@ src/tech_monitoring/
   db/connection.py, db/migrate.py, db/weekly_run.py
   pipeline_v2.py                  # v2 오케스트레이터(매주 wipe 담당)
   pipeline_v3.py                  # v3 오케스트레이터(wipe 안 함 — v2 이후 실행)
-db/migrations/          # v2(001) + v3(002) + 검색어(003) + 라벨(004) + 라벨 주체(005) 스키마
+db/migrations/          # v2(001) + v3(002) + 검색어(003) + 라벨(004)
+                        # + 라벨 주체(005) + 공용 기사 풀(006) + 관련도 점수(007)
 db/migrations_v1_archive/  # v1 스키마(참고용, 더 이상 적용 안 됨)
 scripts/manage_fixed_keywords.py
 scripts/train_relevance_classifier.py   # 라벨 → 분류기 학습 + 성능 출력

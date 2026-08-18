@@ -5,9 +5,13 @@ from tech_monitoring.analysis import keyword_extraction as ke
 
 
 class _FakeCursor:
-    def __init__(self, search_results: list[dict], fixed_keywords: list[dict]):
+    def __init__(self, search_results: list[dict], fixed_keywords: list[dict],
+                 collected_articles: list[dict] | None = None):
         self._search_results = search_results
         self._fixed_keywords = fixed_keywords
+        # 006 공용 풀 + 007 시장별 점수. 행에 score/fixed_keyword_id를 넣으면
+        # 그 시장에 점수가 매겨진 기사로 본다.
+        self._collected = collected_articles or []
         self._result_rows: list[tuple] = []
         self.description = None
 
@@ -18,7 +22,23 @@ class _FakeCursor:
         return False
 
     def execute(self, query, params=()):
-        if "FROM search_results" in query:
+        if "FROM collected_articles ca" in query:      # 점수 상위만
+            fixed_keyword_id, run_id, limit = params
+            rows = [
+                r for r in self._collected
+                if r["run_id"] == run_id and r.get("fixed_keyword_id") == fixed_keyword_id
+                and r.get("score") is not None
+            ]
+            rows.sort(key=lambda r: -r["score"])
+            rows = rows[:limit]
+            self.description = [type("Col", (), {"name": n})() for n in ("title", "snippet", "source_domain")]
+            self._result_rows = [(r["title"], r.get("snippet"), r.get("source_domain")) for r in rows]
+        elif "FROM collected_articles" in query:        # 풀 전체
+            (run_id,) = params
+            rows = [r for r in self._collected if r["run_id"] == run_id]
+            self.description = [type("Col", (), {"name": n})() for n in ("title", "snippet", "source_domain")]
+            self._result_rows = [(r["title"], r.get("snippet"), r.get("source_domain")) for r in rows]
+        elif "FROM search_results" in query:
             run_id, fixed_keyword_id = params
             rows = [
                 r for r in self._search_results
@@ -40,12 +60,13 @@ class _FakeCursor:
 
 
 class _FakeConn:
-    def __init__(self, search_results=None, fixed_keywords=None):
+    def __init__(self, search_results=None, fixed_keywords=None, collected_articles=None):
         self._search_results = search_results or []
         self._fixed_keywords = fixed_keywords or []
+        self._collected = collected_articles or []
 
     def cursor(self):
-        return _FakeCursor(self._search_results, self._fixed_keywords)
+        return _FakeCursor(self._search_results, self._fixed_keywords, self._collected)
 
 
 def test_is_korean_heavy_detects_hangul_dominant_text():
@@ -158,3 +179,46 @@ def test_extract_all_covers_every_active_fixed_keyword():
     assert set(result.keys()) == {1, 2}
     assert result[1]  # 후보가 비어있지 않아야 함
     assert result[2]
+
+
+# ---- fetch_pool_rows: 점수 상위만 쓰기(007) ----
+
+def _pool(title, *, score=None, fixed_keyword_id=None, run_id=1):
+    return {"run_id": run_id, "title": title, "snippet": "요약",
+            "source_domain": "example.com", "score": score,
+            "fixed_keyword_id": fixed_keyword_id}
+
+
+def test_fetch_pool_rows_uses_top_scored_articles_for_that_market():
+    """풀 전체에서 키워드를 뽑으면 시장을 가리지 않는 일반어가 상위를 먹는다
+    (실측 2026-08-19: 시장 셋이 전부 AI/com/Monday). 그 시장 점수 상위만 쓴다."""
+    conn = _FakeConn(collected_articles=[
+        _pool("알짜 기사", score=0.9, fixed_keyword_id=1),
+        _pool("보통 기사", score=0.4, fixed_keyword_id=1),
+        _pool("다른 시장 기사", score=0.95, fixed_keyword_id=2),
+    ])
+
+    rows = ke.fetch_pool_rows(conn, run_id=1, fixed_keyword_id=1)
+
+    assert [r["title"] for r in rows] == ["알짜 기사", "보통 기사"]
+
+
+def test_fetch_pool_rows_respects_top_n_limit():
+    conn = _FakeConn(collected_articles=[
+        _pool(f"기사{i}", score=i / 100, fixed_keyword_id=1)
+        for i in range(ke.TOP_ARTICLES_FOR_KEYWORDS + 10)
+    ])
+
+    rows = ke.fetch_pool_rows(conn, run_id=1, fixed_keyword_id=1)
+
+    assert len(rows) == ke.TOP_ARTICLES_FOR_KEYWORDS
+
+
+def test_fetch_pool_rows_falls_back_to_whole_pool_before_any_scoring():
+    """첫 주엔 점수가 없다 — 그때 후보를 아예 못 뽑는 것보다 풀 전체를 쓰는
+    편이 낫다(시장별로 같은 키워드가 나오는 건 감수)."""
+    conn = _FakeConn(collected_articles=[_pool("점수 없는 기사"), _pool("또 하나")])
+
+    rows = ke.fetch_pool_rows(conn, run_id=1, fixed_keyword_id=1)
+
+    assert [r["title"] for r in rows] == ["점수 없는 기사", "또 하나"]

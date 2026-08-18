@@ -86,21 +86,46 @@ def fetch_search_results(conn, run_id: int, fixed_keyword_id: int) -> list[dict]
         return [dict(zip(columns, row)) for row in cur.fetchall()]
 
 
-def fetch_pool_rows(conn, run_id: int, fixed_keyword_id: int | None = None) -> list[dict]:
-    """공용 기사 풀(collected_articles) 전체 — 006부터 여기가 수집 결과다.
+"""키워드 후보를 뽑을 기사 수. 분류기 점수 상위만 넣는다 — 풀 전체를 넣으면
+시장을 가리지 않는 일반어가 상위를 먹는다(실측 2026-08-19: 시장 세 개가
+전부 "AI/com/Monday"였다). 30건은 화면의 주요 키워드 표시 개수(get_market_
+keywords의 limit)와 같은 수준이면 충분하다는 판단."""
+TOP_ARTICLES_FOR_KEYWORDS = 30
 
-    fixed_keyword_id를 받되 쓰지 않는다: keyword_merge.run_for_all_keywords가
-    fetch_rows(conn, run_id, kw_id) 모양으로 부르기 때문에 시그니처만 맞춘다.
-    풀은 시장과 무관하므로 지금은 시장마다 같은 기사에서 키워드를 뽑는다 —
-    분류기 점수가 붙은 뒤에는 "그 시장 상위 기사만"으로 좁히는 게 맞다
-    (그때 이 함수에 필터를 넣는다)."""
+
+def fetch_pool_rows(conn, run_id: int, fixed_keyword_id: int | None = None) -> list[dict]:
+    """키워드 후보를 뽑을 기사들 — 공용 기사 풀(collected_articles)에서.
+
+    분류기 점수(007)가 있으면 **그 시장 상위 기사만** 쓴다. 점수가 아직
+    없으면(첫 주) 풀 전체를 쓴다 — 그때는 시장별로 같은 키워드가 나오지만,
+    후보를 아예 못 뽑는 것보다는 낫다.
+    """
+    if fixed_keyword_id is None:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT title, snippet, source_domain FROM collected_articles WHERE run_id = %s",
+                (run_id,),
+            )
+            columns = [c.name for c in cur.description]
+            return [dict(zip(columns, row)) for row in cur.fetchall()]
+
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT title, snippet, source_domain FROM collected_articles WHERE run_id = %s",
-            (run_id,),
+            """
+            SELECT ca.title, ca.snippet, ca.source_domain
+            FROM collected_articles ca
+            JOIN article_keyword_relevance r
+              ON r.article_id = ca.id AND r.fixed_keyword_id = %s
+            WHERE ca.run_id = %s AND r.score IS NOT NULL
+            ORDER BY r.score DESC
+            LIMIT %s
+            """,
+            (fixed_keyword_id, run_id, TOP_ARTICLES_FOR_KEYWORDS),
         )
         columns = [c.name for c in cur.description]
-        return [dict(zip(columns, row)) for row in cur.fetchall()]
+        scored = [dict(zip(columns, row)) for row in cur.fetchall()]
+
+    return scored or fetch_pool_rows(conn, run_id)
 
 
 def build_term_sets(rows: list[dict]) -> list[set[str]]:

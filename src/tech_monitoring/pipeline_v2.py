@@ -6,7 +6,8 @@ analysis/keyword_merge.py)에 적용한 것 — v1이 완전히 정리되면 이
 pipeline.py 자리를 대체할 예정이다.
 
 순서 고정 이유:
-    (매주 데이터 wipe) → 이번 주 run 시작 → 검색엔진 수집(사이트별 공용 풀) →
+    (매주 데이터 wipe) → 이번 주 run 시작 → 검색엔진 수집(사이트별 공용 풀)
+    → 시장별 관련도 점수(분류기) →
         키워드 후보추출 + Gemini 동의어 병합(고정 키워드별, run 전체 한 번에)
     수집이 끝나야 그 주 collected_articles가 확정되고, 그걸 기반으로 키워드
     후보를 뽑아야 한다 — 순서가 바뀌면 지난주 데이터로 이번 주 키워드를
@@ -37,6 +38,7 @@ import time
 
 from tech_monitoring.analysis.keyword_extraction import fetch_pool_rows
 from tech_monitoring.analysis.keyword_merge import run_for_all_keywords
+from tech_monitoring.analysis.relevance_filter import judge_all
 from tech_monitoring.collectors.search_engine import collect_all
 from tech_monitoring.db.connection import get_connection
 from tech_monitoring.db.weekly_run import (
@@ -74,6 +76,18 @@ def _collect(run_id: int) -> dict:
     return {"results": collect_all(run_id)}
 
 
+def _judge_relevance(run_id: int) -> dict:
+    """수집된 기사에 시장별 점수를 매긴다(007). 학습된 모델이 없으면 각
+    항목이 "skipped:모델 없음"으로 돌아온다 — 실패가 아니라 아직 라벨이
+    없다는 뜻이라 error에 담지 않는다(담으면 파이프라인이 매주 실패로
+    마감된다). 그 상태에서는 화면이 최신순 전체를 보여준다."""
+    conn = get_connection()
+    try:
+        return {"results": judge_all(conn, run_id)}
+    finally:
+        conn.close()
+
+
 def _merge_keywords(run_id: int) -> dict:
     """키워드 후보를 공용 기사 풀에서 뽑는다(006부터) — 기본값인
     search_results는 이제 수집되지 않으므로 fetch_rows를 명시해야 한다."""
@@ -90,6 +104,7 @@ def _stages(run_id: int) -> list[tuple[str, object]]:
     # (v1 pipeline.py와 동일 패턴).
     return [
         ("collect", lambda: _collect(run_id)),
+        ("judge_relevance", lambda: _judge_relevance(run_id)),
         ("merge_keywords", lambda: _merge_keywords(run_id)),
     ]
 

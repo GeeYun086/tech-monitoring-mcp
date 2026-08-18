@@ -12,7 +12,9 @@ _COLS_BY_TABLE = {
     "market_keywords": ("canonical_phrase", "variant_phrases", "doc_count", "tfidf_score"),
     "search_results": ("title", "url", "snippet", "source_domain", "published_at", "rank"),
     # 006 공용 기사 풀 — 시장(fixed_keyword_id) 컬럼이 없다.
-    "collected_articles": ("title", "url", "snippet", "source_domain", "published_at", "source_name"),
+    # score는 007에서 붙은 시장별 분류기 점수(LEFT JOIN으로 딸려온다).
+    "collected_articles": ("title", "url", "snippet", "source_domain", "published_at",
+                           "source_name", "score"),
 }
 
 
@@ -52,7 +54,12 @@ class _FakeCursor:
             rows.sort(key=lambda r: (-r["doc_count"], -(r["tfidf_score"] or -1)))
             rows = rows[:limit]
         elif table == "collected_articles":
-            run_id, *rest = params
+            # 시장별 정렬 질의는 (fixed_keyword_id, run_id) 순으로 넘어온다.
+            scoped = "LEFT JOIN article_keyword_relevance" in query
+            if scoped:
+                fixed_keyword_id, run_id, *rest = params
+            else:
+                fixed_keyword_id, (run_id, *rest) = None, params
             rows = [r for r in self._tables.get("collected_articles", []) if r["run_id"] == run_id]
             if "ILIKE" in query:
                 patterns, _patterns2, *rest = rest
@@ -61,7 +68,17 @@ class _FakeCursor:
                     r for r in rows
                     if any(n in r["title"] or n in (r.get("snippet") or "") for n in needles)
                 ]
+            # 점수는 (기사, 시장) 쌍에만 붙는다 — 없으면 NULL로 딸려온다.
+            scores = {
+                (s["url"], s["fixed_keyword_id"]): s["score"]
+                for s in self._tables.get("article_keyword_relevance", [])
+            }
+            rows = [{**r, "score": scores.get((r["url"], fixed_keyword_id))} for r in rows]
             rows = _sort_by_published_at_desc_nulls_last(rows)
+            if scoped:
+                # ORDER BY score DESC NULLS LAST, published_at DESC — 위 최신순
+                # 정렬을 유지한 채(파이썬 sort는 안정적) 점수만 앞세운다.
+                rows.sort(key=lambda r: (r["score"] is None, -(r["score"] or 0)))
             if rest:
                 rows = rows[:rest[0]]
         elif "ILIKE" in query:
@@ -298,3 +315,74 @@ def test_get_pool_articles_for_variants_returns_nothing_without_phrases():
     conn = _FakeConn(collected_articles=[_pool_row("https://a.com/1")])
 
     assert dq.get_pool_articles_for_variants(conn, run_id=1, variant_phrases=[]) == []
+
+
+# --- 007 분류기 점수 정렬 ---------------------------------------------------
+
+def test_get_pool_articles_orders_by_market_score_when_available():
+    """같은 풀을 시장별로 다른 순서로 본다 — 이게 라벨링이 화면에 반영되는
+    유일한 경로다(v2엔 원래 관련도 판단 단계가 없었다)."""
+    conn = _FakeConn(
+        collected_articles=[
+            _pool_row("https://a.com/low", title="무관", published_at=datetime(2026, 8, 19)),
+            _pool_row("https://a.com/high", title="알짜", published_at=datetime(2026, 8, 17)),
+        ],
+        article_keyword_relevance=[
+            {"url": "https://a.com/low", "fixed_keyword_id": 1, "score": 0.05},
+            {"url": "https://a.com/high", "fixed_keyword_id": 1, "score": 0.93},
+        ],
+    )
+
+    result = dq.get_pool_articles(conn, run_id=1, fixed_keyword_id=1)
+
+    # 최신순이면 무관이 먼저지만, 점수 순서가 이를 뒤집어야 한다.
+    assert [r["title"] for r in result] == ["알짜", "무관"]
+    assert result[0]["score"] == 0.93
+
+
+def test_get_pool_articles_keeps_low_scoring_articles():
+    """잘라내지 않는다 — 분류기가 틀려도 기사가 사라지면 안 되고, 라벨링에는
+    도움 안 되는 기사도 필요하다."""
+    conn = _FakeConn(
+        collected_articles=[_pool_row(f"https://a.com/{i}") for i in range(5)],
+        article_keyword_relevance=[
+            {"url": f"https://a.com/{i}", "fixed_keyword_id": 1, "score": 0.01} for i in range(5)
+        ],
+    )
+
+    assert len(dq.get_pool_articles(conn, run_id=1, fixed_keyword_id=1)) == 5
+
+
+def test_get_pool_articles_puts_unscored_articles_after_scored_ones():
+    """판단 전 기사(또는 확률을 주지 않는 Gemini 판단)는 NULLS LAST로 밀린 뒤
+    최신순으로 이어진다 — 점수 유무가 곧 "분류기가 봤는지"다."""
+    conn = _FakeConn(
+        collected_articles=[
+            _pool_row("https://a.com/unscored", title="판단 전", published_at=datetime(2026, 8, 19)),
+            _pool_row("https://a.com/scored", title="점수 있음", published_at=datetime(2026, 8, 17)),
+        ],
+        article_keyword_relevance=[
+            {"url": "https://a.com/scored", "fixed_keyword_id": 1, "score": 0.2},
+        ],
+    )
+
+    result = dq.get_pool_articles(conn, run_id=1, fixed_keyword_id=1)
+
+    assert [r["title"] for r in result] == ["점수 있음", "판단 전"]
+
+
+def test_get_pool_articles_ignores_other_markets_scores():
+    conn = _FakeConn(
+        collected_articles=[
+            _pool_row("https://a.com/1", title="가", published_at=datetime(2026, 8, 17)),
+            _pool_row("https://a.com/2", title="나", published_at=datetime(2026, 8, 19)),
+        ],
+        article_keyword_relevance=[
+            {"url": "https://a.com/1", "fixed_keyword_id": 2, "score": 0.99},   # 다른 시장
+        ],
+    )
+
+    result = dq.get_pool_articles(conn, run_id=1, fixed_keyword_id=1)
+
+    assert [r["title"] for r in result] == ["나", "가"]        # 점수 없음 → 최신순
+    assert all(r["score"] is None for r in result)
