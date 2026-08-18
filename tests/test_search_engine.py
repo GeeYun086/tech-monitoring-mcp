@@ -22,8 +22,10 @@ class _FakeCursor:
     """INSERT ... RETURNING id 만 이해하는 최소 스텁. ON CONFLICT DO NOTHING을
     inserted_urls 집합으로 흉내낸다 — 이미 있으면 fetchone()이 None(=미삽입)."""
 
-    def __init__(self, inserted_urls: set[str], inserted_params: list[tuple]):
+    def __init__(self, inserted_urls: set[str], inserted_params: list[tuple],
+                 inserted_titles: set[str]):
         self._inserted_urls = inserted_urls
+        self._inserted_titles = inserted_titles
         self._inserted_params = inserted_params
         self._last_params = None
         self._url_index = None
@@ -42,9 +44,13 @@ class _FakeCursor:
 
     def fetchone(self):
         url = self._last_params[self._url_index]
-        if url in self._inserted_urls:
+        # 공용 풀 INSERT는 제목 중복도 막는다(WHERE NOT EXISTS) — 스텁도 같게.
+        title = self._last_params[2] if self._url_index == 3 else None
+        if url in self._inserted_urls or (title is not None and title in self._inserted_titles):
             return None
         self._inserted_urls.add(url)
+        if title is not None:
+            self._inserted_titles.add(title)
         self._inserted_params.append(self._last_params)
         return (1,)
 
@@ -52,10 +58,11 @@ class _FakeCursor:
 class _FakeConn:
     def __init__(self):
         self.inserted_urls: set[str] = set()
+        self.inserted_titles: set[str] = set()
         self.inserted_params: list[tuple] = []
 
     def cursor(self):
-        return _FakeCursor(self.inserted_urls, self.inserted_params)
+        return _FakeCursor(self.inserted_urls, self.inserted_params, self.inserted_titles)
 
     def close(self):
         pass
@@ -419,3 +426,86 @@ def test_pool_returns_error_on_http_failure_without_raising(monkeypatch):
 
     assert result["source"] == "AI타임스"
     assert "boom" in result["error"]
+
+
+# ---- derive_title: 제목이 사이트 이름뿐일 때 스니펫으로 대체 ----
+# Techmeme 실측(2026-08-19) — 42건 중 11건이 제목이 "Techmeme"뿐이라
+# 라벨링 카드에서 사람이 판단할 수 없었다.
+
+def test_derive_title_keeps_real_titles():
+    item = {"title": "Anthropic revenue surges to $65B", "content": "본문 요약"}
+
+    assert search_engine.derive_title(item, "techcrunch.com") == "Anthropic revenue surges to $65B"
+
+
+@pytest.mark.parametrize("title", ["Techmeme", "techmeme", "techmeme.com", "", "(제목 없음)"])
+def test_derive_title_replaces_site_name_with_snippet(title):
+    item = {"title": title, "content": "Palona raised a $20M round"}
+
+    assert search_engine.derive_title(item, "techmeme.com") == "Palona raised a $20M round"
+
+
+def test_derive_title_strips_source_attribution():
+    """Techmeme 스니펫은 "기자 / 매체: 헤드라인" 모양이라 앞머리를 떼야
+    제목이 읽힌다."""
+    item = {"title": "Techmeme", "content": "Mike Wheatley / SiliconANGLE:   Palona raised $20M"}
+
+    assert search_engine.derive_title(item, "techmeme.com") == "Palona raised $20M"
+
+
+def test_derive_title_keeps_colons_that_are_part_of_the_sentence():
+    """본문 콜론까지 지우면 내용이 날아간다 — "@"나 " / "가 있는 출처 표기만 뗀다."""
+    item = {"title": "Techmeme", "content": "속보: 오픈AI가 데이터센터를 늘린다"}
+
+    assert search_engine.derive_title(item, "techmeme.com") == "속보: 오픈AI가 데이터센터를 늘린다"
+
+
+def test_derive_title_truncates_long_snippets_at_word_boundary():
+    item = {"title": "Techmeme", "content": "word " * 60}
+
+    result = search_engine.derive_title(item, "techmeme.com")
+
+    assert len(result) <= search_engine.DERIVED_TITLE_MAX + 1   # 말줄임표 한 글자
+    assert result.endswith("…")
+    assert not result.endswith(" …")
+
+
+def test_derive_title_falls_back_when_snippet_is_missing_too():
+    """조용히 행을 버리지 않는다 — 어떤 후보도 사라지면 안 된다는 기존 원칙."""
+    assert search_engine.derive_title({"title": "Techmeme", "content": ""}, "techmeme.com") == "(제목 없음)"
+
+
+def test_pool_insert_uses_derived_title(monkeypatch):
+    monkeypatch.setattr(search_engine, "_fetch_site_results", lambda term, domain, start, end: [
+        {"url": "https://www.techmeme.com/260819/p1", "title": "Techmeme",
+         "content": "Mike Wheatley / SiliconANGLE: Palona raised $20M"},
+    ])
+    conn = _FakeConn()
+
+    search_engine.collect_pool_for_site(conn, 1, "techmeme.com", _START, _END)
+
+    (params,) = conn.inserted_params
+    assert params[2] == "Palona raised $20M"   # title 자리
+
+
+def test_derive_title_strips_site_name_prefix():
+    """Tavily가 "Techmeme: 실제 헤드라인"처럼 사이트명을 붙여 주는 경우도 있다 —
+    출처는 source_name에 이미 있으니 제목에서는 뺀다."""
+    item = {"title": "Techmeme: Palona raised $20M", "content": "본문"}
+
+    assert search_engine.derive_title(item, "techmeme.com") == "Palona raised $20M"
+
+
+def test_pool_skips_duplicate_titles_from_different_urls(monkeypatch):
+    """Techmeme 리버 앵커는 URL이 달라도 같은 글을 가리킬 수 있다(실측 41건 중
+    6건 중복). 그대로 두면 라벨링에서 같은 내용을 두 번 판단하게 된다."""
+    monkeypatch.setattr(search_engine, "_fetch_site_results", lambda term, domain, start, end: [
+        {"url": "https://www.techmeme.com/260819/p3", "title": "Techmeme", "content": "같은 헤드라인"},
+        {"url": "https://www.techmeme.com/260819/p16", "title": "Techmeme", "content": "같은 헤드라인"},
+    ])
+    conn = _FakeConn()
+
+    result = search_engine.collect_pool_for_site(conn, 1, "techmeme.com", _START, _END)
+
+    assert result["inserted"] == 1
+    assert [p[2] for p in conn.inserted_params] == ["같은 헤드라인"]

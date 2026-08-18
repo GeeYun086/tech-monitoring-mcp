@@ -64,14 +64,18 @@ end_date로 이 run의 period_start/end(db/weekly_run.get_run_period)를
 그대로 넘기면 실제 검색 자체가 그 달력 주로 정확히 맞춰져 배너와 항상
 일치한다.
 
-**Techmeme는 Tavily 색인 커버리지 자체가 얕다**(2026-08-13 실측 —
-time_range를 한 달로 넓혀도 0건). 저희 화이트리스트 필터 문제가 아니라
-Tavily가 이 사이트를 잘 못 가져오는 것으로 보인다 — 알려진 한계로 남겨둔다.
+**Techmeme**: 2026-08-13에는 색인 커버리지가 얕아 0건이었지만(time_range를
+한 달로 넓혀도 0건), 넓은 질의로 바꾼 뒤 12건이 잡혔다(2026-08-19 실측) —
+좁은 질의로 못 찾던 것이 원인이었던 것으로 보인다. 대신 이 사이트는 리버
+페이지 앵커(techmeme.com/260818/p3)가 잡혀서 페이지 제목이 "Techmeme"뿐인
+경우가 많다(42건 중 11건). 실제 헤드라인은 스니펫에 있어 derive_title이
+대신 채운다.
 
     ./.venv/Scripts/python.exe -m tech_monitoring.collectors.search_engine
 """
 
 import fnmatch
+import re
 from datetime import date
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit
@@ -198,6 +202,53 @@ def _extract_domain(url: str) -> str:
     return urlsplit(url).netloc
 
 
+# 제목 대신 사이트 이름만 들어오는 경우를 위한 스니펫 앞머리 정리(아래 참고).
+# "Michael Veale / @michae.lv:", "@nymag.com:" 같은 출처 표기를 떼어낸다 —
+# 콜론 앞이 짧고 "@"나 " / "를 포함할 때만 지운다(본문에 있는 콜론은 남긴다).
+_ATTRIBUTION_RE = re.compile(r"^([^:]{0,80}):\s+")
+DERIVED_TITLE_MAX = 110
+
+
+def derive_title(item: dict, domain: str) -> str:
+    """저장할 제목. Tavily가 제목을 못 주면 스니펫 앞머리로 대신한다.
+
+    Techmeme에서 실측된 문제(2026-08-19): 수집된 42건 중 11건이 제목이
+    "Techmeme"뿐이었다. techmeme.com/260818/p3 같은 URL은 리버 페이지의
+    앵커라서 페이지 제목이 사이트 이름이고, 실제 헤드라인은 본문(스니펫)에
+    들어 있다. 그대로 저장하면 라벨링 카드에 "Techmeme"만 떠서 사람이
+    판단할 수가 없다 — 학습 데이터도 그만큼 버려진다.
+
+    제목을 버리지 않고 **비어 있을 때만** 대체한다. 스니펫까지 없으면
+    "(제목 없음)"으로 남긴다(조용히 행을 버리지 않는다 — 어떤 후보도 사라지면
+    안 된다는 기존 원칙)."""
+    site = SITE_NAMES.get(domain, domain)
+    title = (item.get("title") or "").strip()
+
+    # "Techmeme: Palona, which uses AI agents..."처럼 사이트 이름이 제목 앞에
+    # 붙어 오는 경우가 있다 — 출처는 source_name에 이미 있으니 중복이다.
+    for prefix in (f"{site}: ", f"{domain}: "):
+        if title.lower().startswith(prefix.lower()):
+            title = title[len(prefix):].strip()
+            break
+
+    if title.lower() not in {"", "(제목 없음)", site.lower(), domain.lower()}:
+        return title
+
+    snippet = " ".join((item.get("content") or "").split())
+    if not snippet:
+        return "(제목 없음)"
+
+    match = _ATTRIBUTION_RE.match(snippet)
+    if match and ("@" in match.group(1) or " / " in match.group(1)):
+        snippet = snippet[match.end():]
+
+    if len(snippet) <= DERIVED_TITLE_MAX:
+        return snippet
+    cut = snippet[:DERIVED_TITLE_MAX]
+    head, _, tail = cut.rpartition(" ")
+    return f"{head or cut}…"
+
+
 def _parse_published_date(value: str | None):
     """Tavily가 주는 published_date는 RFC 2822 형식 문자열
     (예: "Tue, 11 Aug 2026 16:25:20 GMT") — 2026-08-13 실제 응답으로 확인.
@@ -292,27 +343,40 @@ def _insert_pool_article(conn, *, run_id: int, domain: str, query: str, item: di
     """공용 기사 풀에 저장. 시장(fixed_keyword_id)을 넣지 않는 게 핵심 —
     "이 기사가 어느 시장에 관련 있나"는 article_keyword_relevance가 따로
     받는다(006 헤더 참고). 컬럼 구성은 v3 수집기(rss_collector._insert_article)
-    와 같게 맞춰서, 판단·라벨링·화면이 수집 방식을 구분하지 않게 한다."""
+    와 같게 맞춰서, 판단·라벨링·화면이 수집 방식을 구분하지 않게 한다.
+
+    **URL 중복 외에 제목 중복도 막는다.** Techmeme은 리버 페이지 앵커가
+    잡히는데 /260819/p3 과 /260819/p16 이 같은 글을 가리키는 경우가 있다
+    (실측 2026-08-19: 41건 중 고유 제목 35건 = 6건이 중복). URL이 다르니
+    ON CONFLICT (run_id, url)로는 안 걸러지고, 라벨링 화면에서 같은 내용을
+    두 번 판단하게 된다. 정보를 버리는 게 아니라 같은 글을 한 번만 남기는
+    것이라 URL 정규화와 같은 성격의 중복 제거다."""
     url = item.get("url")
     if not url:
         return False
+    title = derive_title(item, domain)
     with conn.cursor() as cur:
         cur.execute(
             """
             INSERT INTO collected_articles
                 (run_id, source_name, fetch_method, title, url, source_domain, snippet, published_at)
-            VALUES (%s, %s, 'search', %s, %s, %s, %s, %s)
+            SELECT %s, %s, 'search', %s, %s, %s, %s, %s
+            WHERE NOT EXISTS (
+                SELECT 1 FROM collected_articles WHERE run_id = %s AND title = %s
+            )
             ON CONFLICT (run_id, url) DO NOTHING
             RETURNING id
             """,
             (
                 run_id,
                 SITE_NAMES.get(domain, domain),
-                item.get("title") or "(제목 없음)",
+                title,
                 normalize_url(url),
                 _extract_domain(url),
                 item.get("content"),
                 _parse_published_date(item.get("published_date")),
+                run_id,
+                title,
             ),
         )
         return cur.fetchone() is not None
