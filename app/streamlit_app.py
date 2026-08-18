@@ -20,8 +20,10 @@
        나란히 보여준다(쏠린 라벨에서 정확도만 보면 착시가 생긴다).
     4. 고정 키워드(모니터링 대상 시장) 탭
        - 주간 이슈 기사(주요 콘텐츠) — top20 등으로 안 자르고 이번 주
-         수집분 전체를 최신순으로 보여준다(2026-08-13 담당자 확인 —
-         나중에 라벨링 작업에 쓸 예정이라 넉넉하게).
+         수집분 전체를 보여준다(2026-08-13 담당자 확인 — 나중에 라벨링
+         작업에 쓸 예정이라 넉넉하게). 기사 풀은 시장과 무관한 하나이고
+         (006), **정렬만** 시장별 분류기 점수로 달라진다(007) — 점수가 낮은
+         기사도 목록에 남는다. 아직 모델이 없으면 최신순이다.
        - 이번 주 주요 키워드는 접힌 expander(보조 지표)로 축소했다 —
          대문자 시작 휴리스틱이라 완벽하지 않고(US·Security 같은 애매한
          것도 섞임), 담당자가 "기사를 제대로 보여주는 쪽"에 무게를 두기로
@@ -39,6 +41,7 @@ import streamlit as st
 from tech_monitoring import dashboard_queries as dq
 from tech_monitoring import labeling
 from tech_monitoring import relevance_model
+from tech_monitoring.analysis.relevance_filter import judge_all
 from tech_monitoring.collectors.search_engine import search_once
 from tech_monitoring.db.connection import get_connection
 from tech_monitoring.db.weekly_run import get_run_period
@@ -362,7 +365,21 @@ def _render_performance_tab(conn) -> None:
         path = relevance_model.save_model(estimator, best["method"], best["metrics"])
     st.success(
         f"**{best['method']}** 방식이 가장 좋았습니다(F1 {best['metrics']['f1']:.3f}). "
-        f"이 모델을 `{path.name}`로 저장했습니다 — 파이프라인이 Gemini 대신 사용합니다."
+        f"이 모델을 `{path.name}`로 저장했습니다."
+    )
+
+    # 모델만 저장하고 끝내면 시장 탭은 여전히 옛 순서(또는 최신순)를 보여준다.
+    # 라벨링 → 측정 → 목록 갱신이 한 번에 이어지도록 여기서 바로 재판단한다
+    # (파이프라인을 다시 돌릴 필요가 없다 — 수집은 그대로 쓰고 점수만 갱신).
+    run = dq.get_latest_run(conn)
+    if run is None:
+        return
+    with st.spinner("새 모델로 이번 주 기사 순위를 다시 매기는 중입니다…"):
+        judged = judge_all(conn, run["id"])
+    total = sum(r["judged"] for r in judged)
+    st.success(
+        f"이번 주 기사 {total}건에 시장별 점수를 다시 매겼습니다. "
+        "각 시장 탭의 기사 순서가 갱신됐습니다."
     )
 
 
@@ -380,7 +397,7 @@ def _render_keyword_tab(conn, run_id: int, fixed_keyword: dict) -> None:
     # 006부터 기사는 시장과 무관한 공용 풀에서 온다 — 세 탭이 같은 목록을
     # 보여주고, 시장별 순서는 분류기 점수가 붙으면 갈라진다(작업 3).
     if selected == "(전체)":
-        articles = dq.get_pool_articles(conn, run_id)
+        articles = dq.get_pool_articles(conn, run_id, fixed_keyword["id"])
     else:
         variant_phrases = next(
             k["variant_phrases"] for k in keywords if k["canonical_phrase"] == selected

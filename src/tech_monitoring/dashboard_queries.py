@@ -119,20 +119,38 @@ def get_search_results(conn, run_id: int, fixed_keyword_id: int, limit: int | No
         return _apply_summary_truncation([dict(zip(columns, row)) for row in cur.fetchall()])
 
 
-def get_pool_articles(conn, run_id: int, limit: int | None = None) -> list[dict]:
+def get_pool_articles(
+    conn, run_id: int, fixed_keyword_id: int | None = None, limit: int | None = None,
+) -> list[dict]:
     """이번 주 공용 기사 풀(006부터 화면이 보여줄 목록).
 
-    시장 인자를 받지 않는다 — 풀은 시장과 무관하고, 시장 탭들은 같은 목록을
-    각자의 기준으로 **정렬만** 달리해서 보여주는 구조로 간다. 아직 분류기
-    점수가 없으므로 지금은 세 탭이 동일한 최신순 목록이다(작업 3에서 정렬이
-    붙는다). 잘라내지 않는 건 기존 원칙 그대로 — 분류기가 틀려도 기사가
-    사라지지 않아야 하고, 라벨링에는 무관 기사도 필요하다."""
-    query = (
-        "SELECT title, url, snippet, source_domain, published_at, source_name "
-        "FROM collected_articles WHERE run_id = %s "
-        "ORDER BY published_at DESC NULLS LAST"
-    )
-    params: list = [run_id]
+    풀 자체는 시장과 무관하다 — 시장 탭들은 **같은 목록을 각자의 순서로**
+    본다. fixed_keyword_id를 주면 그 시장의 분류기 점수(007)를 붙여 점수
+    내림차순으로 정렬하고, 점수가 없는 기사(판단 전이거나 Gemini 판단)는
+    NULLS LAST로 밀어낸 뒤 최신순으로 잇는다.
+
+    **잘라내지 않는다.** 점수가 낮아도 목록에 남는다 — 분류기가 틀려도 기사가
+    사라지면 안 되고("Gemini가 막히면 그 주 0건"과 같은 사고), 라벨링에는
+    도움 안 되는 기사도 필요하다. 순위만 바꾸는 게 이 설계의 핵심이다."""
+    if fixed_keyword_id is None:
+        query = (
+            "SELECT title, url, snippet, source_domain, published_at, source_name, "
+            "NULL::real AS score "
+            "FROM collected_articles WHERE run_id = %s "
+            "ORDER BY published_at DESC NULLS LAST"
+        )
+        params: list = [run_id]
+    else:
+        query = (
+            "SELECT ca.title, ca.url, ca.snippet, ca.source_domain, ca.published_at, "
+            "ca.source_name, r.score "
+            "FROM collected_articles ca "
+            "LEFT JOIN article_keyword_relevance r "
+            "  ON r.article_id = ca.id AND r.fixed_keyword_id = %s "
+            "WHERE ca.run_id = %s "
+            "ORDER BY r.score DESC NULLS LAST, ca.published_at DESC NULLS LAST"
+        )
+        params = [fixed_keyword_id, run_id]
     if limit is not None:
         query += " LIMIT %s"
         params.append(limit)

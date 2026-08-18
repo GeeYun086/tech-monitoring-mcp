@@ -55,7 +55,7 @@ def test_judge_keyword_returns_zero_when_no_articles():
 def test_judge_keyword_saves_relevance_for_every_article(monkeypatch):
     saved = []
 
-    def fake_save(conn, run_id, fixed_keyword_id, articles, relevant_indices):
+    def fake_save(conn, run_id, fixed_keyword_id, articles, relevant_indices, scores=None):
         saved.append((fixed_keyword_id, relevant_indices))
         return len(relevant_indices)
 
@@ -92,7 +92,8 @@ def test_judge_keyword_falls_back_safely_on_gemini_failure(monkeypatch):
 def test_judge_keyword_falls_back_to_no_relevant_on_unparseable_response(monkeypatch):
     monkeypatch.setattr(rf, "call_gemini", lambda prompt: "이상한 응답")
     saved = []
-    monkeypatch.setattr(rf, "_save_relevance", lambda conn, run_id, kw_id, articles, indices: saved.append(indices) or 0)
+    monkeypatch.setattr(rf, "_save_relevance",
+                        lambda conn, run_id, kw_id, articles, indices, scores=None: saved.append(indices) or 0)
 
     result = rf.judge_keyword(
         conn=None, run_id=1, fixed_keyword={"id": 1, "keyword": "AX 시장"},
@@ -115,6 +116,9 @@ def test_judge_all_reuses_same_articles_across_keywords(monkeypatch):
         {"id": 1, "keyword": "AX 시장"}, {"id": 2, "keyword": "교육"},
     ])
     monkeypatch.setattr(rf, "judge_keyword", lambda conn, run_id, kw, articles, bundle=None: judge_calls.append((kw["id"], articles)) or {"ok": kw["id"]})
+    # 모델이 없으면 판단 자체를 건너뛰므로(2026-08-19), 이 테스트가 재사용을
+    # 검증할 수 있도록 모델이 있는 상황을 만든다.
+    monkeypatch.setattr("tech_monitoring.relevance_model.load_model", lambda *a, **k: {"method": "tfidf"})
 
     results = rf.judge_all(conn=None, run_id=7)
 
@@ -170,9 +174,10 @@ def test_judge_keyword_uses_classifier_when_model_is_available(monkeypatch):
     gemini_calls = []
     monkeypatch.setattr(rf, "call_gemini", lambda prompt: gemini_calls.append(prompt) or "{}")
     saved = []
-    monkeypatch.setattr(rf, "_save_relevance", lambda conn, run_id, kw_id, arts, idx: saved.append(idx) or 0)
-    # 0.9 / 0.2 → 기준선(0.5) 위인 0번만 관련 있음으로 잡혀야 한다.
-    monkeypatch.setattr(rf, "judge_with_classifier", lambda bundle, kw, arts: {0})
+    monkeypatch.setattr(rf, "_save_relevance",
+                        lambda conn, run_id, kw_id, arts, idx, scores=None: saved.append((idx, scores)) or 0)
+    # 0.9 / 0.2 → 기준선(0.5) 위인 0번만 관련 있음으로 잡히고, 확률은 그대로 저장된다.
+    monkeypatch.setattr(rf, "score_with_classifier", lambda bundle, kw, arts: [0.9, 0.2])
 
     result = rf.judge_keyword(
         conn=None, run_id=1, fixed_keyword={"id": 1, "keyword": "교육"},
@@ -183,12 +188,13 @@ def test_judge_keyword_uses_classifier_when_model_is_available(monkeypatch):
     assert gemini_calls == []
     assert result["method"] == "classifier:tfidf"
     assert result["relevant"] == 1
-    assert saved == [{0}]
+    assert saved == [({0}, [0.9, 0.2])]   # 낮은 점수도 버리지 않고 함께 저장(007)
 
 
-def test_judge_with_classifier_applies_threshold_and_market_keyword(monkeypatch):
+def test_score_with_classifier_returns_probabilities_with_market_keyword(monkeypatch):
     """분류기 입력은 학습 때와 같은 형식이어야 한다 — 고정 키워드가 함께
-    들어가야 하고, 확률은 RELEVANCE_THRESHOLD로 잘린다."""
+    들어가야 한다. 그리고 **확률을 그대로** 돌려줘야 한다(007) — 여기서 잘라
+    집합만 넘기면 순위 정보가 사라진다."""
     seen = {}
 
     def fake_predict_proba(bundle, rows):
@@ -199,19 +205,37 @@ def test_judge_with_classifier_applies_threshold_and_market_keyword(monkeypatch)
         "tech_monitoring.relevance_model.predict_proba", fake_predict_proba, raising=True,
     )
 
-    indices = rf.judge_with_classifier(
+    scores = rf.score_with_classifier(
         {"method": "tfidf"}, {"id": 1, "keyword": "교육"},
         [{"id": 1, "title": "가", "snippet": "요약"}, {"id": 2, "title": "나"}, {"id": 3, "title": "다"}],
     )
 
-    assert indices == {0, 2}                              # 0.49는 탈락, 0.5는 통과
+    assert scores == [0.9, 0.49, 0.5]
     assert all(r["fixed_keyword"] == "교육" for r in seen["rows"])
     assert seen["rows"][0]["title"] == "가"
 
 
-def test_judge_all_falls_back_to_gemini_when_no_model_trained(monkeypatch):
-    """라벨이 쌓이기 전에도 파이프라인은 돌아야 한다 — 모델이 없으면
-    bundle=None으로 넘겨 기존 Gemini 경로를 쓴다."""
+def test_judge_all_skips_judging_when_no_model_trained(monkeypatch):
+    """모델이 없으면 판단을 건너뛴다(2026-08-19 결정) — 라벨이 없는 첫 주에
+    LLM을 부를 이유가 없다. 점수가 없으면 화면이 최신순 전체를 보여주고,
+    그 주 결과물은 사람이 라벨링한 것 자체가 된다. 실패가 아니므로 error는
+    비어 있어야 한다(담으면 파이프라인이 매주 실패로 마감된다)."""
+    monkeypatch.setattr("tech_monitoring.relevance_model.load_model", lambda *a, **k: None)
+    monkeypatch.setattr(rf, "get_active_fixed_keywords", lambda conn: [{"id": 1, "keyword": "교육"}])
+    fetched, judged = [], []
+    monkeypatch.setattr(rf, "fetch_collected_articles", lambda conn, run_id: fetched.append(run_id) or [])
+    monkeypatch.setattr(rf, "judge_keyword",
+                        lambda conn, run_id, kw, arts, bundle=None: judged.append(kw) or {"ok": True})
+
+    (result,) = rf.judge_all(conn=None, run_id=1)
+
+    assert result["method"] == "skipped:모델 없음"
+    assert result["error"] is None
+    assert (fetched, judged) == ([], [])   # 기사도 안 읽고 판단도 안 한다
+
+
+def test_judge_all_can_still_use_gemini_when_explicitly_allowed(monkeypatch):
+    """Gemini 경로는 지우지 않고 비교 실험용으로 남겨둔다."""
     monkeypatch.setattr("tech_monitoring.relevance_model.load_model", lambda *a, **k: None)
     monkeypatch.setattr(rf, "fetch_collected_articles", lambda conn, run_id: [{"id": 1, "title": "기사"}])
     monkeypatch.setattr(rf, "get_active_fixed_keywords", lambda conn: [{"id": 1, "keyword": "교육"}])
@@ -219,7 +243,7 @@ def test_judge_all_falls_back_to_gemini_when_no_model_trained(monkeypatch):
     monkeypatch.setattr(rf, "judge_keyword",
                         lambda conn, run_id, kw, arts, bundle=None: bundles.append(bundle) or {"ok": True})
 
-    rf.judge_all(conn=None, run_id=1)
+    rf.judge_all(conn=None, run_id=1, allow_llm_fallback=True)
 
     assert bundles == [None]
 
@@ -243,7 +267,7 @@ def test_judge_all_loads_model_once_for_all_keywords(monkeypatch):
 def test_classifier_failure_is_reported_not_swallowed(monkeypatch):
     """분류기 쪽이 터져도(모델 파일 손상 등) 파이프라인이 죽지 않고 error로
     보고해야 한다 — 그리고 그 error는 pipeline_report가 실패로 집계한다."""
-    monkeypatch.setattr(rf, "judge_with_classifier",
+    monkeypatch.setattr(rf, "score_with_classifier",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("모델 손상")))
 
     result = rf.judge_keyword(

@@ -109,32 +109,50 @@ def fetch_relevant_articles(conn, run_id: int, fixed_keyword_id: int) -> list[di
 
 
 def _save_relevance(
-    conn, run_id: int, fixed_keyword_id: int, articles: list[dict], relevant_indices: set[int],
+    conn, run_id: int, fixed_keyword_id: int, articles: list[dict],
+    relevant_indices: set[int], scores: list[float] | None = None,
 ) -> int:
-    inserted = 0
+    """판단 결과를 저장한다 — 관련 있는 것만이 아니라 **모든 기사**에 대해.
+
+    순위를 매기려면 낮은 점수도 남아 있어야 한다(007 헤더). 재판단 시에는
+    점수가 갱신돼야 하므로 DO NOTHING이 아니라 DO UPDATE다 — 라벨을 더 모아
+    모델을 다시 학습했으면 같은 기사의 점수가 달라지는 게 정상이다.
+    """
+    saved = 0
     with conn.cursor() as cur:
         for i, article in enumerate(articles):
             cur.execute(
                 """
-                INSERT INTO article_keyword_relevance (run_id, article_id, fixed_keyword_id, is_relevant)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (article_id, fixed_keyword_id) DO NOTHING
+                INSERT INTO article_keyword_relevance
+                    (run_id, article_id, fixed_keyword_id, is_relevant, score)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (article_id, fixed_keyword_id) DO UPDATE SET
+                    is_relevant = EXCLUDED.is_relevant,
+                    score = EXCLUDED.score,
+                    judged_at = now()
                 RETURNING id
                 """,
-                (run_id, article["id"], fixed_keyword_id, i in relevant_indices),
+                (
+                    run_id, article["id"], fixed_keyword_id,
+                    i in relevant_indices,
+                    None if scores is None else float(scores[i]),
+                ),
             )
             if cur.fetchone() is not None:
-                inserted += 1
-    return inserted
+                saved += 1
+    return saved
 
 
-def judge_with_classifier(bundle: dict, fixed_keyword: dict, articles: list[dict]) -> set[int]:
-    """학습된 로컬 분류기로 판단한다(Gemini 대체 경로).
+def score_with_classifier(bundle: dict, fixed_keyword: dict, articles: list[dict]) -> list[float]:
+    """학습된 로컬 분류기로 기사마다 "이 시장에 도움될 확률"을 매긴다.
 
     relevance_model.build_text가 읽을 수 있는 모양으로 맞춰서 넘긴다 —
     학습 때와 **똑같은 입력 형식**이어야 한다(고정 키워드를 앞에 붙인
     "키워드 [SEP] 제목 요약"). 여기서 형식이 어긋나면 정확도가 조용히
     무너지므로 build_text를 직접 재사용한다.
+
+    확률을 그대로 돌려주는 게 핵심이다(예전에는 여기서 0.5로 잘라 집합만
+    돌려줘 순위 정보를 버렸다 — 007 헤더 참고).
     """
     from tech_monitoring.relevance_model import predict_proba
 
@@ -142,8 +160,7 @@ def judge_with_classifier(bundle: dict, fixed_keyword: dict, articles: list[dict
         {"fixed_keyword": fixed_keyword["keyword"], "title": a["title"], "snippet": a.get("snippet")}
         for a in articles
     ]
-    probabilities = predict_proba(bundle, rows)
-    return {i for i, p in enumerate(probabilities) if p >= RELEVANCE_THRESHOLD}
+    return [float(p) for p in predict_proba(bundle, rows)]
 
 
 def judge_keyword(conn, run_id: int, fixed_keyword: dict, articles: list[dict], bundle=None) -> dict:
@@ -157,9 +174,11 @@ def judge_keyword(conn, run_id: int, fixed_keyword: dict, articles: list[dict], 
                 "method": None, "error": None}
 
     method = f"classifier:{bundle['method']}" if bundle else "gemini"
+    scores = None
     try:
         if bundle is not None:
-            relevant_indices = judge_with_classifier(bundle, fixed_keyword, articles)
+            scores = score_with_classifier(bundle, fixed_keyword, articles)
+            relevant_indices = {i for i, p in enumerate(scores) if p >= RELEVANCE_THRESHOLD}
         else:
             relevant_indices = parse_relevant_indices(
                 call_gemini(build_prompt(fixed_keyword["keyword"], articles)), len(articles),
@@ -170,7 +189,7 @@ def judge_keyword(conn, run_id: int, fixed_keyword: dict, articles: list[dict], 
             "method": method, "error": f"{type(exc).__name__}: {exc}",
         }
 
-    _save_relevance(conn, run_id, fixed_keyword["id"], articles, relevant_indices)
+    _save_relevance(conn, run_id, fixed_keyword["id"], articles, relevant_indices, scores)
     return {
         "fixed_keyword": fixed_keyword["keyword"],
         "judged": len(articles),
@@ -180,21 +199,34 @@ def judge_keyword(conn, run_id: int, fixed_keyword: dict, articles: list[dict], 
     }
 
 
-def judge_all(conn, run_id: int) -> list[dict]:
+def judge_all(conn, run_id: int, *, allow_llm_fallback: bool = False) -> list[dict]:
     """이번 run에 수집된 기사 전체를 딱 한 번 가져와서, 활성 고정 키워드
     각각에 대해 배치 판단한다(기사 목록 자체는 고정 키워드마다 재사용 —
     수집은 한 번, 판단만 키워드 수만큼).
 
-    학습된 분류기가 있으면 그걸 쓰고, 없으면 Gemini로 폴백한다 — 라벨이
-    쌓이기 전에도 파이프라인이 돌아야 하기 때문이다. 어느 쪽을 썼는지는
-    결과의 "method"에 남아 파이프라인 로그에서 확인할 수 있다(모델이
-    있는 줄 알았는데 조용히 Gemini를 쓰고 있는 상황을 알아챌 수 있게).
+    **모델이 없으면 판단을 건너뛴다**(2026-08-19 결정). 예전에는 Gemini로
+    폴백했는데, 라벨이 아직 없는 첫 주에 굳이 LLM을 부를 이유가 없다 —
+    점수가 없으면 화면이 최신순 전체를 보여주고, 그 주 결과물은 사람이
+    라벨링한 것 자체가 된다. Gemini 경로는 지우지 않고 allow_llm_fallback로
+    남겨둔다(비교 실험용).
+
+    어느 쪽으로 판단했는지는 결과의 "method"에 남는다 — 모델이 있는 줄
+    알았는데 조용히 다른 경로를 타는 상황을 알아챌 수 있게.
     """
     from tech_monitoring.relevance_model import load_model
 
     bundle = load_model()
+    keywords = get_active_fixed_keywords(conn)
+
+    if bundle is None and not allow_llm_fallback:
+        return [
+            {"fixed_keyword": kw["keyword"], "judged": 0, "relevant": 0,
+             "method": "skipped:모델 없음", "error": None}
+            for kw in keywords
+        ]
+
     articles = fetch_collected_articles(conn, run_id)
-    return [judge_keyword(conn, run_id, kw, articles, bundle) for kw in get_active_fixed_keywords(conn)]
+    return [judge_keyword(conn, run_id, kw, articles, bundle) for kw in keywords]
 
 
 if __name__ == "__main__":
