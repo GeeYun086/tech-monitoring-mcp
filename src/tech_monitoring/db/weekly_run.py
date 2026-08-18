@@ -23,6 +23,15 @@ def get_active_fixed_keywords(conn) -> list[dict]:
         return [dict(zip(columns, row)) for row in cur.fetchall()]
 
 
+def week_bounds_for(day: date) -> tuple[date, date]:
+    """그 날짜가 속한 달력 주(월~일). 이번 주뿐 아니라 과거 주에도 쓴다 —
+    최초 라벨링용 소급 수집(scripts/backfill_past_weeks.py)이 주차별로
+    Tavily 검색 범위를 잡을 때, 그리고 라벨을 기사 발행 주로 묶을 때
+    (labeling.save_label) 같은 기준을 써야 한다."""
+    monday = day - timedelta(days=day.weekday())
+    return monday, monday + timedelta(days=6)
+
+
 def _current_week_bounds(today: date | None = None) -> tuple[date, date]:
     """이번 주 월~일 달력 주간.
 
@@ -34,9 +43,7 @@ def _current_week_bounds(today: date | None = None) -> tuple[date, date]:
     배너 표시와 실제 수집 기사 날짜가 항상 일치한다(rolling window로
     바꿨을 때와 달리, 이번엔 "표시"가 아니라 "실제 검색 범위"를 달력 주에
     맞추는 방식이라 두 요구사항이 충돌하지 않는다)."""
-    today = today or date.today()
-    monday = today - timedelta(days=today.weekday())
-    return monday, monday + timedelta(days=6)
+    return week_bounds_for(today or date.today())
 
 
 def start_weekly_run(conn, today: date | None = None) -> int:

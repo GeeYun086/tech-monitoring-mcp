@@ -12,7 +12,8 @@
        저장 후 다음 기사로 넘어간다 — 262건을 훑어야 해서 목록을 통째로
        그리면 클릭마다 전체 재렌더가 걸리고 어디까지 했는지도 놓친다.
        라벨을 저장하면 그 기사는 후보에서 빠지므로 rerun만으로 자연히
-       다음 기사가 나온다.
+       다음 기사가 나온다. 카드 아래 접힌 "라벨 검토 및 수정"에서 판단을
+       변경하거나 라벨을 취소할 수 있다(취소하면 후보 목록으로 복귀).
     3. 📈 성능 탭 — 라벨을 정답지로 삼아 분류기를 채점한다(relevance_model).
        라벨 수가 적을 때는 클래스 분포만 보여주고, 최소 기준을 넘으면 버튼을
        눌러 측정한다 — 클릭마다 자동 학습하면 임베딩 모델 로드(수십 초)가
@@ -68,7 +69,7 @@ def _conn():
         st.stop()
 
 
-def _render_run_banner(run: dict | None) -> None:
+def _render_run_banner(conn, run: dict | None) -> None:
     if run is None:
         st.warning(
             "아직 수집된 데이터가 없습니다. "
@@ -77,6 +78,15 @@ def _render_run_banner(run: dict | None) -> None:
         return
     label = _STATUS_LABELS.get(run["status"], run["status"])
     st.caption(f"기준 기간: {run['period_start']} ~ {run['period_end']} · 상태: {label}")
+
+    # 소급 수집분이 섞여 있으면 그렇다고 말해준다 — 안 그러면 기준 기간보다
+    # 오래된 기사가 목록에 있는 게 기간 계산 오류처럼 보인다.
+    span = dq.get_pool_span(conn, run["id"])
+    if span["oldest"] and span["oldest"] < run["period_start"]:
+        st.caption(
+            f"↳ 최초 라벨링용 **소급 수집분 포함** — 목록의 기사 발행일은 "
+            f"{span['oldest']} ~ {span['newest']} ({span['total']}건)"
+        )
 
     # 실패를 화면에서 바로 알 수 있게(2026-08-18) — 그 전까지는 파이프라인이
     # 조용히 실패해도 "결과가 좀 적네"로만 보였다. 아래 기사 목록이 비어
@@ -201,10 +211,54 @@ def _render_labeling_tab(conn, run_id: int, fixed_keywords: list[dict], period_s
             st.info(f"보류한 {len(candidates)}건만 남았습니다. 새로고침하면 다시 볼 수 있습니다.")
         else:
             st.success("이 시장은 라벨링이 끝났습니다. 위에서 다른 시장을 선택하세요.")
+    else:
+        st.divider()
+        _render_labeling_card(conn, pending[0], fixed_keyword, period_start)
+
+    _render_label_review(conn, fixed_keyword)
+
+
+_LABEL_BADGES = {
+    labeling.LABEL_RELEVANT: "👍 도움됨",
+    labeling.LABEL_IRRELEVANT: "👎 도움 안 됨",
+}
+
+
+def _render_label_review(conn, fixed_keyword: dict) -> None:
+    """방금 매긴 라벨을 되돌아보고 고치는 자리.
+
+    카드를 빠르게 넘기는 작업이라 오클릭이 생기는데, 그 판단이 그대로 학습
+    데이터가 되므로 되돌릴 수단이 필요하다. 접어두는 이유는 라벨링 흐름을
+    방해하지 않기 위해서다 — 기본 작업은 위쪽 카드 하나에 집중한다.
+    """
+    recent = labeling.fetch_recent_labels(conn, fixed_keyword["id"])
+    if not recent:
         return
 
-    st.divider()
-    _render_labeling_card(conn, pending[0], fixed_keyword, period_start)
+    with st.expander(f"✅ 라벨 검토 및 수정 (최근 {len(recent)}건)", expanded=False):
+        st.caption(
+            "최근에 판단한 순서로 표시됩니다. 판단을 변경하거나, 라벨을 취소해 "
+            "해당 기사를 후보 목록으로 되돌릴 수 있습니다."
+        )
+        for row in recent:
+            published = row["published_at"].strftime("%Y-%m-%d") if row.get("published_at") else "날짜 미상"
+            text, flip, cancel = st.columns([6, 2, 1.4])
+            text.markdown(
+                f"{_LABEL_BADGES.get(row['label'], row['label'])} · [{row['title']}]({row['url']})  \n"
+                f"<span style='color:gray'>{row.get('source_domain') or '출처 미상'} · {published}</span>",
+                unsafe_allow_html=True,
+            )
+            key = f"{fixed_keyword['id']}_{row['url_norm']}"
+            opposite = (
+                labeling.LABEL_IRRELEVANT if row["label"] == labeling.LABEL_RELEVANT
+                else labeling.LABEL_RELEVANT
+            )
+            if flip.button(f"{_LABEL_BADGES[opposite]}으로 변경", key=f"flip_{key}", use_container_width=True):
+                labeling.update_label(conn, row["url_norm"], fixed_keyword["id"], opposite)
+                st.rerun()
+            if cancel.button("라벨 취소", key=f"del_{key}", use_container_width=True):
+                labeling.delete_label(conn, row["url_norm"], fixed_keyword["id"])
+                st.rerun()
 
 
 @st.cache_data(show_spinner=False)
@@ -413,7 +467,7 @@ def main() -> None:
 
     conn = _conn()
     run = dq.get_latest_run(conn)
-    _render_run_banner(run)
+    _render_run_banner(conn, run)
 
     _render_search_box()
     st.divider()

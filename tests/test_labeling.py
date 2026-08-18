@@ -15,9 +15,11 @@ from tech_monitoring import labeling
 
 
 class _FakeCursor:
-    def __init__(self, tables: dict, inserts: list):
+    def __init__(self, tables: dict, inserts: list, updates: list, deletes: list):
         self._tables = tables
         self._inserts = inserts
+        self._updates = updates
+        self._deletes = deletes
         self._rows: list[tuple] = []
         self.description = None
 
@@ -62,6 +64,28 @@ class _FakeCursor:
             for r in rows:
                 counts[r["label"]] = counts.get(r["label"], 0) + 1
             self._rows = list(counts.items())
+        elif "FROM article_labels" in query and "ORDER BY labeled_at DESC" in query:
+            fixed_keyword_id, labeled_by, limit = params
+            rows = [r for r in self._labels()
+                    if r["fixed_keyword_id"] == fixed_keyword_id
+                    and r["labeled_by"] == labeled_by]
+            rows.sort(key=lambda r: r.get("labeled_at") or 0, reverse=True)
+            self._set(("url_norm", "url", "title", "label", "source_domain",
+                       "published_at", "labeled_at"), rows[:limit])
+        elif "UPDATE article_labels" in query:
+            label, url_norm, fixed_keyword_id, labeled_by = params
+            self._updates.append((url_norm, fixed_keyword_id, labeled_by, label))
+            hit = [r for r in self._labels()
+                   if r["url_norm"] == url_norm and r["fixed_keyword_id"] == fixed_keyword_id
+                   and r["labeled_by"] == labeled_by]
+            self._rows = [(1,)] if hit else []
+        elif "DELETE FROM article_labels" in query:
+            url_norm, fixed_keyword_id, labeled_by = params
+            self._deletes.append((url_norm, fixed_keyword_id, labeled_by))
+            hit = [r for r in self._labels()
+                   if r["url_norm"] == url_norm and r["fixed_keyword_id"] == fixed_keyword_id
+                   and r["labeled_by"] == labeled_by]
+            self._rows = [(1,)] if hit else []
         elif "FROM article_labels l" in query:
             keywords = {k["id"]: k["keyword"] for k in self._tables.get("fixed_keywords", [])}
             rows = [{**r, "fixed_keyword": keywords[r["fixed_keyword_id"]]}
@@ -86,6 +110,9 @@ class _FakeCursor:
         else:
             raise AssertionError(f"스텁이 모르는 질의: {query}")
 
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
     def fetchall(self):
         return self._rows
 
@@ -94,9 +121,11 @@ class _FakeConn:
     def __init__(self, **tables):
         self.tables = tables
         self.inserts: list = []
+        self.updates: list = []
+        self.deletes: list = []
 
     def cursor(self):
-        return _FakeCursor(self.tables, self.inserts)
+        return _FakeCursor(self.tables, self.inserts, self.updates, self.deletes)
 
 
 @pytest.fixture(autouse=True)
@@ -318,3 +347,111 @@ def test_fetch_all_labels_joins_keyword_text():
 
     assert row["fixed_keyword"] == "교육"
     assert row["label"] == "relevant"
+
+
+# --- 라벨의 주차 그룹(작업 4: 소급 수집) ---------------------------------
+
+def test_label_period_comes_from_article_publication_week():
+    """소급 수집분이 이번 주 run에 함께 담기므로 run 기준으로 묶으면 전부 같은
+    주가 된다 — 그러면 주차 단위로 fold를 나눌 수 없다(relevance_model.
+    build_groups). 기사 발행 주로 묶어야 소급분이 여러 주로 갈린다."""
+    conn = _FakeConn()
+    article = {**_article("https://a.com/1", published_at=datetime(2026, 8, 6)),
+               "source_table": "collected_articles"}
+
+    labeling.save_label(conn, 1, article, labeling.LABEL_RELEVANT, date(2026, 8, 17))
+
+    (params,) = conn.inserts
+    assert params[9] == date(2026, 8, 3)      # 8/6은 8/3(월) 주
+
+
+def test_label_period_falls_back_to_run_week_without_publication_date():
+    """Tavily가 published_date를 안 주는 기사도 있다 — 그때는 수집 주를 쓴다."""
+    conn = _FakeConn()
+    article = {**_article("https://a.com/1"), "source_table": "collected_articles"}
+
+    labeling.save_label(conn, 1, article, labeling.LABEL_RELEVANT, date(2026, 8, 17))
+
+    (params,) = conn.inserts
+    assert params[9] == date(2026, 8, 17)
+
+
+# --- 라벨 검토·수정(작업 5) -------------------------------------------------
+
+def _label_row(url_norm, *, label="relevant", fixed_keyword_id=1, labeled_by="local",
+               labeled_at=None, title="제목"):
+    return {"url_norm": url_norm, "url": url_norm, "title": title, "label": label,
+            "fixed_keyword_id": fixed_keyword_id, "labeled_by": labeled_by,
+            "source_domain": "example.com", "published_at": None, "labeled_at": labeled_at}
+
+
+def test_recent_labels_show_last_clicked_first():
+    """실수는 방금 누른 것에서 찾는 게 가장 빠르다 — labeled_at 내림차순."""
+    conn = _FakeConn(article_labels=[
+        _label_row("u1", labeled_at=datetime(2026, 8, 19, 10, 0), title="먼저"),
+        _label_row("u2", labeled_at=datetime(2026, 8, 19, 11, 0), title="나중"),
+    ])
+
+    rows = labeling.fetch_recent_labels(conn, fixed_keyword_id=1)
+
+    assert [r["title"] for r in rows] == ["나중", "먼저"]
+
+
+def test_recent_labels_only_mine_and_this_market():
+    conn = _FakeConn(article_labels=[
+        _label_row("mine", labeled_at=datetime(2026, 8, 19, 10, 0)),
+        _label_row("other-person", labeled_by="동료", labeled_at=datetime(2026, 8, 19, 11, 0)),
+        _label_row("other-market", fixed_keyword_id=2, labeled_at=datetime(2026, 8, 19, 12, 0)),
+    ])
+
+    rows = labeling.fetch_recent_labels(conn, fixed_keyword_id=1)
+
+    assert [r["url_norm"] for r in rows] == ["mine"]
+
+
+def test_recent_labels_respects_limit():
+    conn = _FakeConn(article_labels=[
+        _label_row(f"u{i}", labeled_at=datetime(2026, 8, 19, 10, i)) for i in range(30)
+    ])
+
+    assert len(labeling.fetch_recent_labels(conn, fixed_keyword_id=1, limit=5)) == 5
+
+
+def test_update_label_flips_only_my_row():
+    conn = _FakeConn(article_labels=[_label_row("u1", label="relevant")])
+
+    changed = labeling.update_label(conn, "u1", 1, labeling.LABEL_IRRELEVANT)
+
+    assert changed is True
+    assert conn.updates == [("u1", 1, "local", "irrelevant")]
+
+
+def test_update_label_does_not_touch_another_persons_judgement():
+    """공용 DB에서 남의 판단을 내가 뒤집으면 그 사람 학습 데이터가 조용히 바뀐다(005)."""
+    conn = _FakeConn(article_labels=[_label_row("u1", labeled_by="동료")])
+
+    assert labeling.update_label(conn, "u1", 1, labeling.LABEL_IRRELEVANT) is False
+
+
+def test_update_label_rejects_unknown_label():
+    conn = _FakeConn(article_labels=[_label_row("u1")])
+
+    with pytest.raises(ValueError):
+        labeling.update_label(conn, "u1", 1, "maybe")
+
+    assert conn.updates == []
+
+
+def test_delete_label_returns_the_article_to_the_candidate_pool():
+    """눌러보고 나서 판단이 안 서면 지우는 게 맞다 — 억지로 한쪽을 고르면
+    학습 데이터가 오염된다(카드의 "판단 보류"와 같은 논리)."""
+    conn = _FakeConn(article_labels=[_label_row("u1")])
+
+    assert labeling.delete_label(conn, "u1", 1) is True
+    assert conn.deletes == [("u1", 1, "local")]
+
+
+def test_delete_label_scoped_to_me():
+    conn = _FakeConn(article_labels=[_label_row("u1", labeled_by="동료")])
+
+    assert labeling.delete_label(conn, "u1", 1) is False

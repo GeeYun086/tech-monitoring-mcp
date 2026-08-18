@@ -119,6 +119,23 @@ def get_search_results(conn, run_id: int, fixed_keyword_id: int, limit: int | No
         return _apply_summary_truncation([dict(zip(columns, row)) for row in cur.fetchall()])
 
 
+def get_pool_span(conn, run_id: int) -> dict:
+    """이 run 기사 풀의 발행일 범위와 건수.
+
+    소급 수집(scripts/backfill_past_weeks.py)을 돌리면 이번 주 run에 지난
+    몇 주 기사가 함께 담긴다. 그러면 배너의 "기준 기간"과 실제 목록이
+    어긋나 보이는데, 화면이 그걸 말해주지 않으면 사용자는 기간 계산이
+    잘못된 줄 안다. 그래서 범위를 조회해 배너에 함께 적는다."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT min(published_at)::date, max(published_at)::date, count(*) "
+            "FROM collected_articles WHERE run_id = %s",
+            (run_id,),
+        )
+        oldest, newest, total = cur.fetchone()
+    return {"oldest": oldest, "newest": newest, "total": total}
+
+
 def get_pool_articles(
     conn, run_id: int, fixed_keyword_id: int | None = None, limit: int | None = None,
 ) -> list[dict]:
