@@ -200,6 +200,77 @@ def save_label(
         )
 
 
+def fetch_recent_labels(
+    conn, fixed_keyword_id: int, labeled_by: str | None = None, limit: int = 20,
+) -> list[dict]:
+    """내가 이 시장에서 최근에 매긴 라벨 — 마지막에 누른 것부터.
+
+    검토·수정 화면용이다. 라벨링은 카드 하나씩 빠르게 넘기는 작업이라 잘못
+    누르는 일이 생기는데, 그 판단이 그대로 학습 데이터가 되므로 되돌릴
+    방법이 있어야 한다. 방금 누른 것부터 보여주는 게 실수를 찾는 데 가장
+    효율적이라 labeled_at 내림차순이다(id 순은 처음 라벨한 것부터라 반대).
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT url_norm, url, title, label, source_domain, published_at, labeled_at
+            FROM article_labels
+            WHERE fixed_keyword_id = %s AND labeled_by = %s
+            ORDER BY labeled_at DESC
+            LIMIT %s
+            """,
+            (fixed_keyword_id, _labeler(labeled_by), limit),
+        )
+        columns = [c.name for c in cur.description]
+        return [dict(zip(columns, row)) for row in cur.fetchall()]
+
+
+def update_label(
+    conn, url_norm: str, fixed_keyword_id: int, label: str, labeled_by: str | None = None,
+) -> bool:
+    """이미 매긴 라벨을 바꾼다(검토 화면의 "반대로 바꾸기").
+
+    save_label은 기사 스냅샷 전체를 요구하지만 여기서 필요한 건 label 하나다 —
+    이미 저장된 행의 제목·요약을 다시 넘길 이유가 없다. **labeled_by로 좁혀야
+    한다**: 공용 DB에서 남의 판단을 내가 뒤집으면 그 사람 학습 데이터가
+    조용히 바뀐다(005).
+
+    바뀐 행이 없으면 False(이미 지웠거나 남의 라벨을 건드리려 한 경우).
+    """
+    if label not in VALID_LABELS:
+        raise ValueError(f"label은 {VALID_LABELS} 중 하나여야 한다: {label!r}")
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE article_labels SET label = %s, labeled_at = now()
+            WHERE url_norm = %s AND fixed_keyword_id = %s AND labeled_by = %s
+            RETURNING id
+            """,
+            (label, url_norm, fixed_keyword_id, _labeler(labeled_by)),
+        )
+        return cur.fetchone() is not None
+
+
+def delete_label(
+    conn, url_norm: str, fixed_keyword_id: int, labeled_by: str | None = None,
+) -> bool:
+    """라벨을 취소한다 — 그 기사는 다시 라벨링 후보로 돌아온다.
+
+    "반대로 바꾸기"와 다른 선택지가 필요한 이유: 눌러보고 나서 **판단이 안
+    선다**고 느끼는 경우가 있는데, 억지로 한쪽을 고르면 학습 데이터가
+    오염된다(카드의 "판단 보류"와 같은 논리). 지우면 후보 목록에 다시 뜬다.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "DELETE FROM article_labels "
+            "WHERE url_norm = %s AND fixed_keyword_id = %s AND labeled_by = %s "
+            "RETURNING id",
+            (url_norm, fixed_keyword_id, _labeler(labeled_by)),
+        )
+        return cur.fetchone() is not None
+
+
 def count_labels(
     conn, fixed_keyword_id: int | None = None, labeled_by: str | None = None,
 ) -> dict:
