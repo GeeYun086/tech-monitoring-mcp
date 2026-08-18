@@ -8,10 +8,11 @@
     1. 직접 검색(큐레이션 검색엔진 라이브 호출, DB에 저장 안 함)
     2. 🏷️ 라벨링 탭 — 관련도 판단을 Gemini에서 로컬 분류기로 옮기기 위한
        학습 데이터를 사람이 직접 쌓는 화면(2026-08-18 추가, tech_monitoring.
-       labeling). 한 번에 기사 하나만 보여주고 👍/👎를 누르면 저장 후 다음
-       기사로 넘어간다 — 262건을 훑어야 해서 목록을 통째로 그리면 클릭마다
-       전체 재렌더가 걸리고 어디까지 했는지도 놓친다. 라벨을 저장하면 그
-       기사는 후보에서 빠지므로 rerun만으로 자연히 다음 기사가 나온다.
+       labeling). 한 번에 기사 하나만 보여주고 도움됨/도움 안 됨을 누르면
+       저장 후 다음 기사로 넘어간다 — 262건을 훑어야 해서 목록을 통째로
+       그리면 클릭마다 전체 재렌더가 걸리고 어디까지 했는지도 놓친다.
+       라벨을 저장하면 그 기사는 후보에서 빠지므로 rerun만으로 자연히
+       다음 기사가 나온다.
     3. 고정 키워드(모니터링 대상 시장) 탭
        - 주간 이슈 기사(주요 콘텐츠) — top20 등으로 안 자르고 이번 주
          수집분 전체를 최신순으로 보여준다(2026-08-13 담당자 확인 —
@@ -134,7 +135,7 @@ def _render_labeling_progress(conn, fixed_keyword: dict, remaining: int) -> None
     st.progress(done / total if total else 1.0)
     st.caption(
         f"**{fixed_keyword['keyword']}** — 라벨 완료 {done} / {total}건 "
-        f"(👍 알짜 {counts['relevant']} · 👎 패스 {counts['irrelevant']}) · 남은 후보 {remaining}건"
+        f"(도움됨 {counts['relevant']} · 도움 안 됨 {counts['irrelevant']}) · 남은 후보 {remaining}건"
     )
 
 
@@ -155,13 +156,13 @@ def _render_labeling_card(conn, article: dict, fixed_keyword: dict, period_start
     # key에 url_norm을 넣어 기사가 바뀌면 버튼도 새 위젯이 되게 한다 — 같은
     # key를 재사용하면 Streamlit이 이전 클릭 상태를 물려받아 연속 저장이 난다.
     key = f"{fixed_keyword['id']}_{article['url_norm']}"
-    if yes.button("👍 알짜", key=f"yes_{key}", use_container_width=True, type="primary"):
+    if yes.button("도움이 되는 기사예요", key=f"yes_{key}", use_container_width=True, type="primary"):
         _save(labeling.LABEL_RELEVANT)
         st.rerun()
-    if no.button("👎 패스", key=f"no_{key}", use_container_width=True):
+    if no.button("도움이 되지 않는 기사예요", key=f"no_{key}", use_container_width=True):
         _save(labeling.LABEL_IRRELEVANT)
         st.rerun()
-    if skip.button("⏭️ 건너뛰기", key=f"skip_{key}", use_container_width=True):
+    if skip.button("판단 보류", key=f"skip_{key}", use_container_width=True):
         # 저장하지 않고 이번 세션에서만 숨긴다 — 판단이 안 서는 걸 억지로
         # 라벨하면 학습 데이터가 오염된다. 새로고침하면 다시 나온다.
         st.session_state.setdefault("labeling_skipped", set()).add(article["url_norm"])
@@ -171,9 +172,9 @@ def _render_labeling_card(conn, article: dict, fixed_keyword: dict, period_start
 def _render_labeling_tab(conn, run_id: int, fixed_keywords: list[dict], period_start) -> None:
     st.subheader("🏷️ 라벨링")
     st.caption(
-        "기사가 이 시장 모니터링에 **실제로 쓸모 있는지**를 눌러주세요. "
-        "여기 쌓인 판단이 그대로 관련도 분류기의 학습 데이터가 됩니다 "
-        "(같은 기사라도 시장이 다르면 답이 다를 수 있어 시장별로 따로 묻습니다)."
+        "이 기사가 해당 시장을 모니터링하는 데 **도움이 되는지** 선택해 주세요. "
+        "여기에 쌓인 판단이 그대로 관련도 분류기의 학습 데이터가 됩니다 "
+        "(같은 기사라도 시장이 다르면 판단이 달라질 수 있어 시장별로 따로 여쭙니다)."
     )
 
     keyword_names = [kw["keyword"] for kw in fixed_keywords]
@@ -188,7 +189,7 @@ def _render_labeling_tab(conn, run_id: int, fixed_keywords: list[dict], period_s
 
     if not pending:
         if skipped and candidates:
-            st.info(f"건너뛴 {len(candidates)}건만 남았습니다. 새로고침하면 다시 볼 수 있습니다.")
+            st.info(f"보류한 {len(candidates)}건만 남았습니다. 새로고침하면 다시 볼 수 있습니다.")
         else:
             st.success("이 시장은 라벨링이 끝났습니다. 위에서 다른 시장을 선택하세요.")
         return
