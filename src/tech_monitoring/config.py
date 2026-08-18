@@ -12,8 +12,6 @@ class Settings(BaseSettings):
     # (collectors/search_engine.py의 SITE_INCLUDE_PATTERNS 등)로 직접
     # 관리해 별도 UI 설정이 필요 없다.
     tavily_api_key: str | None = None
-    # Tavily time_range 파라미터: day/week/month/year. "week" = 지난 1주일.
-    tavily_time_range: str = "week"
 
     gemini_api_key: str | None = None
     # "gemini-2.0-flash" 고정(404) → "gemini-flash-latest" 별칭(2026-08-13)을

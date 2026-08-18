@@ -10,18 +10,30 @@ from datetime import date, timedelta
 
 
 def get_active_fixed_keywords(conn) -> list[dict]:
+    """search_terms_ko/en(2026-08-13 추가)도 함께 반환한다 — 실제 검색은
+    keyword 문자열 그대로가 아니라 이 언어별 동의어 목록으로 한다
+    (collectors/search_engine.py, db/migrations/003_multi_term_keywords.sql
+    헤더 주석 참고). 비어있으면 collect 쪽에서 keyword로 폴백한다."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, keyword FROM fixed_keywords WHERE active ORDER BY display_order, id"
+            "SELECT id, keyword, search_terms_ko, search_terms_en FROM fixed_keywords "
+            "WHERE active ORDER BY display_order, id"
         )
         columns = [c.name for c in cur.description]
         return [dict(zip(columns, row)) for row in cur.fetchall()]
 
 
 def _current_week_bounds(today: date | None = None) -> tuple[date, date]:
-    """이번 주 월~일 범위. 검색엔진 쪽 dateRestrict=w1("지난 7일" 롤링 윈도우)과는
-    별개로, weekly_runs.period_start/end는 사람이 보기 좋은 달력 주 단위로 기록한다
-    (같은 주에 배치를 다시 돌려도 UNIQUE(period_start, period_end)로 같은 run에 묶임)."""
+    """이번 주 월~일 달력 주간.
+
+    2026-08-13에 "실행일 기준 지난 7일" 롤링 윈도우로 바꾼 적이 있는데
+    (Tavily time_range="week"가 그런 의미라서), 담당자가 달력 주 표시를
+    원해 다시 되돌렸다. 대신 이제 collectors/search_engine.py가
+    time_range 대신 이 period_start/end를 그대로 Tavily의 start_date/
+    end_date로 넘겨 실제 검색 자체를 이 달력 주로 정확히 맞춘다 — 그래서
+    배너 표시와 실제 수집 기사 날짜가 항상 일치한다(rolling window로
+    바꿨을 때와 달리, 이번엔 "표시"가 아니라 "실제 검색 범위"를 달력 주에
+    맞추는 방식이라 두 요구사항이 충돌하지 않는다)."""
     today = today or date.today()
     monday = today - timedelta(days=today.weekday())
     return monday, monday + timedelta(days=6)
@@ -42,6 +54,14 @@ def start_weekly_run(conn, today: date | None = None) -> int:
             (period_start, period_end),
         )
         return cur.fetchone()[0]
+
+
+def get_run_period(conn, run_id: int) -> tuple[date, date]:
+    """collectors/search_engine.py가 Tavily의 start_date/end_date를 이
+    run이 잡아둔 달력 주(period_start/end)에 정확히 맞추기 위해 조회한다."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT period_start, period_end FROM weekly_runs WHERE id = %s", (run_id,))
+        return cur.fetchone()
 
 
 def complete_weekly_run(conn, run_id: int) -> None:

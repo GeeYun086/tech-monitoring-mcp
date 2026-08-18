@@ -2,6 +2,8 @@
 흉내낸 스텁 conn/cursor를 쓴다 — 어떤 SQL이 실행됐는지가 아니라 반환값이
 기대한 필터링·정렬을 반영하는지에 집중한다."""
 
+from datetime import datetime
+
 from tech_monitoring import dashboard_queries as dq
 
 _COLS_BY_TABLE = {
@@ -10,6 +12,12 @@ _COLS_BY_TABLE = {
     "market_keywords": ("canonical_phrase", "variant_phrases", "doc_count", "tfidf_score"),
     "search_results": ("title", "url", "snippet", "source_domain", "published_at", "rank"),
 }
+
+
+def _sort_by_published_at_desc_nulls_last(rows: list[dict]) -> list[dict]:
+    dated = sorted((r for r in rows if r.get("published_at") is not None), key=lambda r: r["published_at"], reverse=True)
+    undated = [r for r in rows if r.get("published_at") is None]
+    return dated + undated
 
 
 class _FakeCursor:
@@ -42,23 +50,27 @@ class _FakeCursor:
             rows.sort(key=lambda r: (-r["doc_count"], -(r["tfidf_score"] or -1)))
             rows = rows[:limit]
         elif "ILIKE" in query:
-            run_id, fixed_keyword_id, patterns, _patterns2, limit = params
+            run_id, fixed_keyword_id, patterns, _patterns2, *rest = params
+            limit = rest[0] if rest else None
             needles = [p.strip("%") for p in patterns]
             rows = [
                 r for r in self._tables.get("search_results", [])
                 if r["run_id"] == run_id and r["fixed_keyword_id"] == fixed_keyword_id
                 and any(n in r["title"] or n in (r.get("snippet") or "") for n in needles)
             ]
-            rows.sort(key=lambda r: r["rank"])
-            rows = rows[:limit]
+            rows = _sort_by_published_at_desc_nulls_last(rows)
+            if limit is not None:
+                rows = rows[:limit]
         else:
-            run_id, fixed_keyword_id, limit = params
+            run_id, fixed_keyword_id, *rest = params
+            limit = rest[0] if rest else None
             rows = [
                 r for r in self._tables.get("search_results", [])
                 if r["run_id"] == run_id and r["fixed_keyword_id"] == fixed_keyword_id
             ]
-            rows.sort(key=lambda r: r["rank"])
-            rows = rows[:limit]
+            rows = _sort_by_published_at_desc_nulls_last(rows)
+            if limit is not None:
+                rows = rows[:limit]
 
         self._rows = [tuple(r[c] for c in cols) for r in rows]
 
@@ -122,13 +134,36 @@ def test_get_market_keywords_respects_limit():
     assert [r["canonical_phrase"] for r in result] == ["kw9", "kw8", "kw7"]
 
 
-def test_get_search_results_orders_by_rank():
+def test_get_search_results_orders_by_published_at_descending():
+    """2026-08-13 실사용 확인 — rank는 사이트마다 1부터 따로 매겨지는 값이라
+    여러 사이트를 rank로 정렬하면 결과 수가 많은 사이트가 상위를 독점해
+    다른 사이트 기사가 화면에 안 보이는 문제가 있었다. 최신순이 공정하다."""
     conn = _FakeConn(search_results=[
-        {"run_id": 1, "fixed_keyword_id": 10, "title": "B", "url": "u2", "snippet": "", "source_domain": "d", "published_at": None, "rank": 2},
-        {"run_id": 1, "fixed_keyword_id": 10, "title": "A", "url": "u1", "snippet": "", "source_domain": "d", "published_at": None, "rank": 1},
+        {"run_id": 1, "fixed_keyword_id": 10, "title": "오래된 기사", "url": "u1", "snippet": "", "source_domain": "d", "published_at": datetime(2026, 8, 10), "rank": 1},
+        {"run_id": 1, "fixed_keyword_id": 10, "title": "최신 기사", "url": "u2", "snippet": "", "source_domain": "d", "published_at": datetime(2026, 8, 15), "rank": 5},
     ])
     result = dq.get_search_results(conn, run_id=1, fixed_keyword_id=10)
-    assert [r["title"] for r in result] == ["A", "B"]
+    assert [r["title"] for r in result] == ["최신 기사", "오래된 기사"]
+
+
+def test_get_search_results_places_missing_published_at_last():
+    conn = _FakeConn(search_results=[
+        {"run_id": 1, "fixed_keyword_id": 10, "title": "발행일 없음", "url": "u1", "snippet": "", "source_domain": "d", "published_at": None, "rank": 1},
+        {"run_id": 1, "fixed_keyword_id": 10, "title": "발행일 있음", "url": "u2", "snippet": "", "source_domain": "d", "published_at": datetime(2026, 8, 10), "rank": 2},
+    ])
+    result = dq.get_search_results(conn, run_id=1, fixed_keyword_id=10)
+    assert [r["title"] for r in result] == ["발행일 있음", "발행일 없음"]
+
+
+def test_get_search_results_returns_all_rows_when_no_limit_given():
+    """2026-08-13 담당자 확인 — top20으로 안 자르고 이번 주 수집분 전체를
+    다 보고 싶다(나중에 라벨링 작업에 쓸 예정)."""
+    conn = _FakeConn(search_results=[
+        {"run_id": 1, "fixed_keyword_id": 10, "title": f"기사{i}", "url": f"u{i}", "snippet": "", "source_domain": "d", "published_at": None, "rank": i}
+        for i in range(30)
+    ])
+    result = dq.get_search_results(conn, run_id=1, fixed_keyword_id=10)
+    assert len(result) == 30
 
 
 def test_get_search_results_for_variants_filters_by_title_or_snippet():
@@ -144,3 +179,42 @@ def test_get_search_results_for_variants_filters_by_title_or_snippet():
 def test_get_search_results_for_variants_returns_empty_for_no_variants():
     conn = _FakeConn(search_results=[])
     assert dq.get_search_results_for_variants(conn, run_id=1, fixed_keyword_id=10, variant_phrases=[]) == []
+
+
+# ---- truncate_summary: 2026-08-13 실사용 확인 — 화면에 문단째로 쏟아지던 문제 ----
+
+def test_truncate_summary_returns_short_text_unchanged():
+    assert dq.truncate_summary("짧은 요약") == "짧은 요약"
+
+
+def test_truncate_summary_handles_none_and_empty():
+    assert dq.truncate_summary(None) == ""
+    assert dq.truncate_summary("") == ""
+
+
+def test_truncate_summary_cuts_long_text_at_word_boundary():
+    text = "word " * 100  # 500자
+    result = dq.truncate_summary(text, max_chars=20)
+    assert len(result) <= 21  # 말줄임표(1자) 포함
+    assert result.endswith("…")
+    assert not result[:-1].endswith(" ")  # 단어 중간이 아니라 공백 기준으로 잘림
+
+
+def test_truncate_summary_collapses_whitespace_and_removes_chunk_markers():
+    """Tavily 응답의 "[...]" 청크 구분자와 개행·중복 공백을 정리해야 한다."""
+    text = "첫 문단입니다.\n\n[...] 둘째 문단입니다.   공백이  많음."
+    result = dq.truncate_summary(text, max_chars=200)
+    assert "[...]" not in result
+    assert "  " not in result
+    assert "\n" not in result
+
+
+def test_get_search_results_truncates_long_snippet():
+    conn = _FakeConn(search_results=[
+        {
+            "run_id": 1, "fixed_keyword_id": 10, "title": "A", "url": "u1",
+            "snippet": "word " * 100, "source_domain": "d", "published_at": None, "rank": 1,
+        },
+    ])
+    result = dq.get_search_results(conn, run_id=1, fixed_keyword_id=10)
+    assert len(result[0]["snippet"]) <= dq._SUMMARY_MAX_CHARS + 1

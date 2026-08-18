@@ -1,12 +1,15 @@
 """검색엔진 수집기(collectors/search_engine.py, Tavily 기반) 테스트.
 실제 네트워크·DB 없이 _fetch_site_results와 conn.cursor()를 스텁으로 대체한다."""
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import httpx
 import pytest
 
 from tech_monitoring.collectors import search_engine
+
+_START = date(2026, 8, 10)
+_END = date(2026, 8, 16)
 
 
 class _FakeCursor:
@@ -14,9 +17,10 @@ class _FakeCursor:
     UNIQUE(run_id, fixed_keyword_id, url) ON CONFLICT DO NOTHING을
     inserted_urls 집합으로 흉내낸다 — 이미 있으면 fetchone()이 None(=미삽입)."""
 
-    def __init__(self, inserted_urls: set[str]):
+    def __init__(self, inserted_urls: set[str], inserted_params: list[tuple]):
         self._inserted_urls = inserted_urls
-        self._last_url = None
+        self._inserted_params = inserted_params
+        self._last_params = None
 
     def __enter__(self):
         return self
@@ -26,21 +30,27 @@ class _FakeCursor:
 
     def execute(self, query, params=None):
         assert "INSERT INTO search_results" in query
-        self._last_url = params[5]  # (run_id, fixed_keyword_id, query, rank, title, url, ...)
+        self._last_params = params  # (run_id, fixed_keyword_id, query, rank, title, url, ...)
 
     def fetchone(self):
-        if self._last_url in self._inserted_urls:
+        url = self._last_params[5]
+        if url in self._inserted_urls:
             return None
-        self._inserted_urls.add(self._last_url)
+        self._inserted_urls.add(url)
+        self._inserted_params.append(self._last_params)
         return (1,)
 
 
 class _FakeConn:
     def __init__(self):
         self.inserted_urls: set[str] = set()
+        self.inserted_params: list[tuple] = []
 
     def cursor(self):
-        return _FakeCursor(self.inserted_urls)
+        return _FakeCursor(self.inserted_urls, self.inserted_params)
+
+    def close(self):
+        pass
 
 
 def _item(url: str) -> dict:
@@ -59,6 +69,7 @@ def _item(url: str) -> dict:
     "https://social.techcrunch.com/2026/08/13/some-story/",
     "https://askedtech.com/knowledge-archive/agent-adoption",
     "https://www.techmeme.com/260813/p1",
+    "https://news.hada.io/topic?id=32454",  # 2026-08-13: 위클리만으론 0건이라 개별 글까지 포함
 ])
 def test_is_allowed_url_accepts_include_patterns(url):
     assert search_engine.is_allowed_url(url) is True
@@ -98,19 +109,93 @@ def test_parse_published_date_falls_back_to_none(value):
     assert search_engine._parse_published_date(value) is None
 
 
+# ---- _terms_for_domain / 다중 검색어(2026-08-13, 실사용 피드백) ----
+
+def test_terms_for_domain_uses_korean_terms_for_korean_sites():
+    kw = {"keyword": "교육", "search_terms_ko": ["AI 교육", "에듀테크"], "search_terms_en": ["AI education"]}
+    assert search_engine._terms_for_domain(kw, "aitimes.com") == ["AI 교육", "에듀테크"]
+
+
+def test_terms_for_domain_uses_english_terms_for_english_sites():
+    kw = {"keyword": "교육", "search_terms_ko": ["AI 교육"], "search_terms_en": ["AI education", "edtech"]}
+    assert search_engine._terms_for_domain(kw, "techcrunch.com") == ["AI education", "edtech"]
+
+
+def test_terms_for_domain_falls_back_to_keyword_when_empty():
+    """아직 언어별 검색어를 등록 안 한 고정 키워드는 keyword 자체로 폴백한다."""
+    kw = {"keyword": "교육", "search_terms_ko": [], "search_terms_en": []}
+    assert search_engine._terms_for_domain(kw, "aitimes.com") == ["교육"]
+    assert search_engine._terms_for_domain(kw, "techcrunch.com") == ["교육"]
+
+
+def test_terms_for_domain_falls_back_when_keys_missing():
+    """search_terms_ko/en 키 자체가 없는 dict(구버전 호출부 호환)도 안전해야 한다."""
+    kw = {"keyword": "교육"}
+    assert search_engine._terms_for_domain(kw, "aitimes.com") == ["교육"]
+
+
+def test_collect_for_keyword_queries_once_per_term_per_site(monkeypatch):
+    """검색어가 여러 개면 그 사이트에 대해 검색어 개수만큼 각각 호출해야 한다."""
+    calls = []
+
+    def fake_fetch(term, domain, start_date, end_date):
+        calls.append((domain, term))
+        return []
+
+    monkeypatch.setattr(search_engine, "_fetch_site_results", fake_fetch)
+
+    kw = {
+        "id": 1, "keyword": "교육",
+        "search_terms_ko": ["AI 교육", "에듀테크"],
+        "search_terms_en": ["AI education"],
+    }
+    search_engine.collect_for_keyword(_FakeConn(), run_id=1, fixed_keyword=kw, start_date=_START, end_date=_END)
+
+    for domain in search_engine.KOREAN_DOMAINS:
+        assert (domain, "AI 교육") in calls
+        assert (domain, "에듀테크") in calls
+    for domain in search_engine.ENGLISH_DOMAINS:
+        assert (domain, "AI education") in calls
+    assert len(calls) == len(search_engine.KOREAN_DOMAINS) * 2 + len(search_engine.ENGLISH_DOMAINS) * 1
+
+
+def test_collect_for_keyword_stores_actual_term_as_query(monkeypatch):
+    """search_results.query엔 카테고리 이름("교육")이 아니라 실제로 검색에
+    쓴 구체적인 검색어("에듀테크")가 남아야 한다 — 나중에 어느 검색어가
+    이 기사를 찾아왔는지 추적할 수 있게."""
+    monkeypatch.setattr(
+        search_engine, "_fetch_site_results",
+        lambda term, domain, start_date, end_date: (
+            [_item("https://www.aitimes.com/news/x.html")] if domain == "aitimes.com" else []
+        ),
+    )
+
+    conn = _FakeConn()
+    kw = {"id": 1, "keyword": "교육", "search_terms_ko": ["에듀테크"], "search_terms_en": []}
+    search_engine.collect_for_keyword(conn, run_id=1, fixed_keyword=kw, start_date=_START, end_date=_END)
+
+    assert len(conn.inserted_params) == 1
+    stored_query = conn.inserted_params[0][2]  # (run_id, fixed_keyword_id, query, ...)
+    assert stored_query == "에듀테크"
+
+
 # ---- collect_for_keyword ----
 
 def test_collect_for_keyword_queries_each_site_domain_separately(monkeypatch):
     """사이트 하나에 결과가 쏠리는 걸 막기 위해 화이트리스트 사이트마다 개별 호출해야 한다."""
     calls = []
 
-    def fake_fetch(keyword, domain):
+    def fake_fetch(keyword, domain, start_date, end_date):
         calls.append(domain)
+        assert (start_date, end_date) == (_START, _END)
         return []
 
     monkeypatch.setattr(search_engine, "_fetch_site_results", fake_fetch)
 
-    search_engine.collect_for_keyword(_FakeConn(), run_id=1, fixed_keyword={"id": 1, "keyword": "에이전트 도입"})
+    search_engine.collect_for_keyword(
+        _FakeConn(), run_id=1, fixed_keyword={"id": 1, "keyword": "에이전트 도입"},
+        start_date=_START, end_date=_END,
+    )
 
     assert calls == search_engine.SITE_DOMAINS
 
@@ -118,14 +203,16 @@ def test_collect_for_keyword_queries_each_site_domain_separately(monkeypatch):
 def test_collect_for_keyword_stores_only_allowed_urls(monkeypatch):
     """Tavily가 도메인은 맞혀도 화이트리스트 경로 밖의 URL(예: techmeme.com/river)을
     돌려주면 저장 단계에서 다시 걸러져야 한다(이중 강제)."""
-    def fake_fetch(keyword, domain):
+    def fake_fetch(keyword, domain, start_date, end_date):
         if domain == "techmeme.com":
             return [_item("https://www.techmeme.com/260813/p1"), _item("https://www.techmeme.com/river")]
         return []
 
     monkeypatch.setattr(search_engine, "_fetch_site_results", fake_fetch)
 
-    result = search_engine.collect_for_keyword(_FakeConn(), run_id=1, fixed_keyword={"id": 1, "keyword": "교육"})
+    result = search_engine.collect_for_keyword(
+        _FakeConn(), run_id=1, fixed_keyword={"id": 1, "keyword": "교육"}, start_date=_START, end_date=_END,
+    )
 
     assert result["fetched"] == 2  # Tavily가 준 원본 개수
     assert result["inserted"] == 1  # 화이트리스트 통과한 것만 저장
@@ -133,12 +220,14 @@ def test_collect_for_keyword_stores_only_allowed_urls(monkeypatch):
 
 
 def test_collect_for_keyword_dedups_same_url_across_sites(monkeypatch):
-    def fake_fetch(keyword, domain):
+    def fake_fetch(keyword, domain, start_date, end_date):
         return [_item("https://techcrunch.com/2026/08/13/story/")]
 
     monkeypatch.setattr(search_engine, "_fetch_site_results", fake_fetch)
 
-    result = search_engine.collect_for_keyword(_FakeConn(), run_id=1, fixed_keyword={"id": 1, "keyword": "교육"})
+    result = search_engine.collect_for_keyword(
+        _FakeConn(), run_id=1, fixed_keyword={"id": 1, "keyword": "교육"}, start_date=_START, end_date=_END,
+    )
 
     # 6개 사이트 전부 같은 URL을 돌려줘도(스텁이라 실제로는 안 그러겠지만) 1건만 저장돼야 함
     assert result["inserted"] == 1
@@ -146,12 +235,14 @@ def test_collect_for_keyword_dedups_same_url_across_sites(monkeypatch):
 
 def test_collect_for_keyword_returns_error_on_http_failure(monkeypatch):
     """한 사이트 호출이 실패해도 예외를 던지지 않고 error 필드로 보고해야 한다(파이프라인 격리)."""
-    def fake_fetch(keyword, domain):
+    def fake_fetch(keyword, domain, start_date, end_date):
         raise httpx.HTTPError("boom")
 
     monkeypatch.setattr(search_engine, "_fetch_site_results", fake_fetch)
 
-    result = search_engine.collect_for_keyword(_FakeConn(), run_id=1, fixed_keyword={"id": 1, "keyword": "교육"})
+    result = search_engine.collect_for_keyword(
+        _FakeConn(), run_id=1, fixed_keyword={"id": 1, "keyword": "교육"}, start_date=_START, end_date=_END,
+    )
 
     assert result["error"] == "boom"
     assert result["fetched"] == 0
@@ -200,3 +291,23 @@ def test_collect_all_reports_missing_credentials(monkeypatch):
 
     assert len(results) == 1
     assert "TAVILY_API_KEY" in results[0]["error"]
+
+
+def test_collect_all_passes_run_period_to_each_keyword(monkeypatch):
+    """이 run의 달력 주(get_run_period)를 조회해 모든 고정 키워드 수집에 그대로 넘겨야 한다."""
+    monkeypatch.setattr(search_engine.settings, "tavily_api_key", "key")
+    monkeypatch.setattr(search_engine, "get_connection", lambda: _FakeConn())
+    monkeypatch.setattr(search_engine, "get_active_fixed_keywords", lambda conn: [
+        {"id": 1, "keyword": "에이전트 도입"}, {"id": 2, "keyword": "교육"},
+    ])
+    monkeypatch.setattr(search_engine, "get_run_period", lambda conn, run_id: (_START, _END))
+
+    calls = []
+    monkeypatch.setattr(
+        search_engine, "collect_for_keyword",
+        lambda conn, run_id, kw, start_date, end_date: calls.append((kw["keyword"], start_date, end_date)),
+    )
+
+    search_engine.collect_all(run_id=1)
+
+    assert calls == [("에이전트 도입", _START, _END), ("교육", _START, _END)]

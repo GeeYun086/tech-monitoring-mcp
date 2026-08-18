@@ -11,7 +11,7 @@ Tavily가 오히려 더 잘 맞는 부분:
 - `include_domains`/`exclude_domains`를 API 파라미터로 직접 받아서(최대
   300/150개) Google처럼 별도 "검색엔진(cx)"을 웹 UI에서 미리 만들어둘
   필요가 없다.
-- `time_range="week"`로 기간 제한 네이티브 지원(dateRestrict=w1과 동일 효과).
+- `start_date`/`end_date`로 정확한 날짜 범위 지정 네이티브 지원.
 - `topic="news"`로 이슈·뉴스 중심 결과에 더 특화.
 - 무료 티어 월 1,000크레딧, 신용카드 등록 불필요(Google 결제 계정 연결
   문제를 아예 겪지 않음).
@@ -28,13 +28,43 @@ Tavily가 오히려 더 잘 맞는 부분:
 Tavily는 페이지네이션이 없고 한 호출당 max_results가 최대 20건이다. 화이트
 리스트 사이트 전체를 한 번에 묶어 검색하면 결과가 특정 사이트로 쏠릴 위험이
 있다(예: 20건 전부 techcrunch.com이고 techmeme.com은 0건). 그래서 고정
-키워드 × 사이트 조합마다 개별 호출한다(3 키워드 × 6 사이트 = 18쿼리/주 —
-무료 한도(월 1,000크레딧, basic depth 1크레딧/회)에 여유가 크다).
+키워드 × 사이트 조합마다 개별 호출한다.
+
+**고정 키워드 하나당 검색어가 여러 개(언어별)일 수 있다**(2026-08-13,
+db/migrations/003_multi_term_keywords.sql). fixed_keywords.keyword 문자열
+하나를 그대로 검색어로 썼더니 (1) 한국어 사이트도 표현이 다르면 못 찾고,
+(2) 영어 사이트(TechCrunch 등)엔 한국어라 아예 안 맞아서 Tavily가 그
+도메인의 무관한 인기글로 채워 넣는 문제가 실측 확인됐다("교육"으로
+검색해도 TechCrunch 결과 19건이 전부 무관했음). 짧게 쪼개는 게 해법은
+아니었다 — "도입"·"실적"만 남기면 오히려 더 흔한 단어라 무관한 것까지
+걸린다(예: "Signal 자동 키 검증 도입"). 그래서 같은 개념의 여러 구체적인
+동의어를 언어별로(search_terms_ko/en) 등록해 병렬로 검색한다 —
+한국어 사이트엔 search_terms_ko 전부, 영어 사이트엔 search_terms_en
+전부를 각각 개별 호출한다(둘 다 비어있으면 keyword 자체로 폴백).
+
+호출 수: 키워드 하나당 (한국어 사이트 3개 × 한국어 검색어 N개) +
+(영어 사이트 3개 × 영어 검색어 M개). N=M=5 기준 30쿼리/키워드 ×
+3키워드 = 90쿼리/주 — 무료 한도(월 1,000크레딧, basic depth 1크레딧/회
+≈ 387/월)에 여유가 있다.
+
+**기간 파라미터는 time_range가 아니라 start_date/end_date를 쓴다**
+(2026-08-13 수정). 원래 time_range="week"(호출 시점 기준 지난 7일 롤링
+윈도우)를 썼는데, 대시보드가 보여주는 weekly_runs.period_start/end(달력
+월~일)와 실제 검색 범위가 어긋나는 문제가 있었다(실행일이 수요일이면
+달력 주 전체가 아니라 그 전주 목요일부터 실행일까지만 검색됨). start_date/
+end_date로 이 run의 period_start/end(db/weekly_run.get_run_period)를
+그대로 넘기면 실제 검색 자체가 그 달력 주로 정확히 맞춰져 배너와 항상
+일치한다.
+
+**Techmeme는 Tavily 색인 커버리지 자체가 얕다**(2026-08-13 실측 —
+time_range를 한 달로 넓혀도 0건). 저희 화이트리스트 필터 문제가 아니라
+Tavily가 이 사이트를 잘 못 가져오는 것으로 보인다 — 알려진 한계로 남겨둔다.
 
     ./.venv/Scripts/python.exe -m tech_monitoring.collectors.search_engine
 """
 
 import fnmatch
+from datetime import date
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit
 
@@ -46,6 +76,7 @@ from tech_monitoring.db.weekly_run import (
     complete_weekly_run,
     fail_weekly_run,
     get_active_fixed_keywords,
+    get_run_period,
     start_weekly_run,
 )
 from tech_monitoring.utils.url_normalize import normalize_url
@@ -59,6 +90,7 @@ SITE_INCLUDE_PATTERNS = [
     "www.itworld.co.kr/article/*",
     "www.aitimes.com/*",
     "news.hada.io/weekly/*",
+    "news.hada.io/topic*",  # 2026-08-13: 위클리 다이제스트만으론 사실상 0건이라 개별 글까지 포함
     "*.techcrunch.com/*",
     "askedtech.com/knowledge-archive/*",
     "www.techmeme.com/*",
@@ -92,6 +124,10 @@ SITE_DOMAINS = [
     "askedtech.com",
     "techmeme.com",
 ]
+
+# 사이트별 언어 — 어느 search_terms_* 목록을 쓸지 결정한다(2026-08-13 추가).
+KOREAN_DOMAINS = {"itworld.co.kr", "aitimes.com", "news.hada.io"}
+ENGLISH_DOMAINS = {"techcrunch.com", "askedtech.com", "techmeme.com"}
 
 
 def _url_path_for_matching(url: str) -> str:
@@ -175,13 +211,14 @@ def search_once(query: str, num: int = 10) -> list[dict]:
     return [r for r in data.get("results", []) if r.get("url") and is_allowed_url(r["url"])]
 
 
-def _fetch_site_results(keyword: str, domain: str) -> list[dict]:
+def _fetch_site_results(keyword: str, domain: str, start_date: date, end_date: date) -> list[dict]:
     payload = {
         "query": keyword,
         "search_depth": "basic",  # 1크레딧/회(advanced는 2) — 무료 한도 절약
         "topic": "news",
         "max_results": RESULTS_PER_SITE,
-        "time_range": settings.tavily_time_range,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
         "include_domains": [domain],
     }
     return _tavily_request(payload).get("results", [])
@@ -212,27 +249,42 @@ def _insert_result(conn, *, run_id: int, fixed_keyword_id: int, query: str, rank
         return cur.fetchone() is not None
 
 
-def collect_for_keyword(conn, run_id: int, fixed_keyword: dict) -> dict:
-    """고정 키워드 하나에 대해 화이트리스트 사이트마다 개별 호출 후 저장."""
+def _terms_for_domain(fixed_keyword: dict, domain: str) -> list[str]:
+    """도메인의 언어에 맞는 검색어 목록. 둘 다 비어있으면(아직 등록 안 함)
+    keyword 자체로 폴백해 기존 동작을 유지한다."""
+    if domain in KOREAN_DOMAINS:
+        terms = fixed_keyword.get("search_terms_ko") or []
+    else:
+        terms = fixed_keyword.get("search_terms_en") or []
+    return terms or [fixed_keyword["keyword"]]
+
+
+def collect_for_keyword(
+    conn, run_id: int, fixed_keyword: dict, start_date: date, end_date: date,
+) -> dict:
+    """고정 키워드 하나에 대해 (화이트리스트 사이트 × 그 언어의 검색어) 조합마다
+    개별 호출 후 저장. start_date/end_date는 이 run의 달력 주
+    (db/weekly_run.get_run_period)다."""
     keyword = fixed_keyword["keyword"]
     fetched = inserted = 0
 
     for domain in SITE_DOMAINS:
-        try:
-            items = _fetch_site_results(keyword, domain)
-        except httpx.HTTPError as exc:
-            return {"fixed_keyword": keyword, "fetched": fetched, "inserted": inserted, "error": str(exc)}
+        for term in _terms_for_domain(fixed_keyword, domain):
+            try:
+                items = _fetch_site_results(term, domain, start_date, end_date)
+            except httpx.HTTPError as exc:
+                return {"fixed_keyword": keyword, "fetched": fetched, "inserted": inserted, "error": str(exc)}
 
-        for rank, item in enumerate(items, start=1):
-            fetched += 1
-            url = item.get("url")
-            if not url or not is_allowed_url(url):
-                continue  # Tavily가 도메인은 맞혀도 경로까지는 우리가 다시 검증
-            if _insert_result(
-                conn, run_id=run_id, fixed_keyword_id=fixed_keyword["id"],
-                query=keyword, rank=rank, item=item,
-            ):
-                inserted += 1
+            for rank, item in enumerate(items, start=1):
+                fetched += 1
+                url = item.get("url")
+                if not url or not is_allowed_url(url):
+                    continue  # Tavily가 도메인은 맞혀도 경로까지는 우리가 다시 검증
+                if _insert_result(
+                    conn, run_id=run_id, fixed_keyword_id=fixed_keyword["id"],
+                    query=term, rank=rank, item=item,
+                ):
+                    inserted += 1
 
     return {"fixed_keyword": keyword, "fetched": fetched, "inserted": inserted, "error": None}
 
@@ -246,7 +298,8 @@ def collect_all(run_id: int) -> list[dict]:
         keywords = get_active_fixed_keywords(conn)
         if not keywords:
             return [{"fixed_keyword": None, "fetched": 0, "inserted": 0, "error": "fixed_keywords에 활성 키워드 없음"}]
-        return [collect_for_keyword(conn, run_id, kw) for kw in keywords]
+        start_date, end_date = get_run_period(conn, run_id)
+        return [collect_for_keyword(conn, run_id, kw, start_date, end_date) for kw in keywords]
     finally:
         conn.close()
 

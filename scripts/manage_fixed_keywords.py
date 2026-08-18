@@ -7,9 +7,16 @@ Streamlit UI가 생기기 전까지 이 테이블을 직접 만지는 유일한 
 
     ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py list
     ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py add "AX 시장" --order 1
+    ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py set-terms "교육" --ko "AI 교육,에듀테크" --en "AI education,edtech"
     ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py deactivate "AX 시장"
     ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py activate "AX 시장"
     ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py remove "AX 시장"
+
+set-terms(2026-08-13 추가): 실제 검색에 쓸 언어별 동의어 목록. keyword
+문자열 자체를 그대로 검색어로 쓰면 (1) 표현이 다르면 못 찾고 (2) 영어
+사이트엔 한국어라 아예 안 맞는 문제가 실사용 확인됐다(collectors/
+search_engine.py 모듈 docstring 참고) — 그래서 keyword는 "표시용 이름"
+으로 두고, 검색은 이 목록으로 한다.
 """
 
 import argparse
@@ -27,11 +34,21 @@ sys.stderr.reconfigure(encoding="utf-8")
 def list_keywords(conn) -> list[dict]:
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, keyword, display_order, active, created_at "
+            "SELECT id, keyword, display_order, active, created_at, search_terms_ko, search_terms_en "
             "FROM fixed_keywords ORDER BY display_order, id"
         )
         columns = [c.name for c in cur.description]
         return [dict(zip(columns, row)) for row in cur.fetchall()]
+
+
+def set_search_terms(conn, keyword: str, terms_ko: list[str], terms_en: list[str]) -> bool:
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE fixed_keywords SET search_terms_ko = %s, search_terms_en = %s "
+            "WHERE keyword = %s RETURNING id",
+            (terms_ko, terms_en, keyword),
+        )
+        return cur.fetchone() is not None
 
 
 def add_keyword(conn, keyword: str, display_order: int) -> None:
@@ -75,6 +92,10 @@ def _print_table(rows: list[dict]) -> None:
     for row in rows:
         status = "active" if row["active"] else "inactive"
         print(f"[{row['id']:>3}] {row['keyword']:<20} order={row['display_order']} ({status})")
+        ko = ", ".join(row.get("search_terms_ko") or []) or "(미등록 — keyword로 폴백)"
+        en = ", ".join(row.get("search_terms_en") or []) or "(미등록 — keyword로 폴백)"
+        print(f"      ko: {ko}")
+        print(f"      en: {en}")
 
 
 def main() -> None:
@@ -95,6 +116,11 @@ def main() -> None:
 
     remove_parser = sub.add_parser("remove", help="완전 삭제(이번 주 수집 데이터가 이미 있으면 FK 위반으로 실패)")
     remove_parser.add_argument("keyword")
+
+    terms_parser = sub.add_parser("set-terms", help="언어별 실제 검색어(동의어) 목록 설정")
+    terms_parser.add_argument("keyword")
+    terms_parser.add_argument("--ko", default="", help="한국어 검색어, 쉼표로 구분")
+    terms_parser.add_argument("--en", default="", help="영어 검색어, 쉼표로 구분")
 
     args = parser.parse_args()
     conn = get_connection()
@@ -119,6 +145,13 @@ def main() -> None:
                 print(f"'{args.keyword}'를 찾을 수 없음", file=sys.stderr)
                 sys.exit(1)
             print(f"삭제됨: {args.keyword}")
+        elif args.command == "set-terms":
+            terms_ko = [t.strip() for t in args.ko.split(",") if t.strip()]
+            terms_en = [t.strip() for t in args.en.split(",") if t.strip()]
+            if not set_search_terms(conn, args.keyword, terms_ko, terms_en):
+                print(f"'{args.keyword}'를 찾을 수 없음", file=sys.stderr)
+                sys.exit(1)
+            print(f"검색어 설정됨: {args.keyword} (ko={terms_ko}, en={terms_en})")
     finally:
         conn.close()
 

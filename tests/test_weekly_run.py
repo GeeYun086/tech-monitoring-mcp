@@ -11,7 +11,9 @@ class _SpyCursor:
         self.executed: list[tuple[str, tuple]] = []
         self._fetchone_result = fetchone_result
         self._fetchall_result = fetchall_result or []
-        self.description = [type("Col", (), {"name": n})() for n in ("id", "keyword")]
+        self.description = [
+            type("Col", (), {"name": n})() for n in ("id", "keyword", "search_terms_ko", "search_terms_en")
+        ]
 
     def __enter__(self):
         return self
@@ -38,27 +40,36 @@ class _SpyConn:
 
 
 def test_get_active_fixed_keywords_queries_active_only_ordered():
-    cursor = _SpyCursor(fetchall_result=[(1, "AX 시장"), (2, "생성형 AI")])
+    cursor = _SpyCursor(fetchall_result=[
+        (1, "AX 시장", ["AX", "AI 전환"], ["AI transformation"]),
+        (2, "생성형 AI", [], []),
+    ])
     conn = _SpyConn(cursor)
 
     result = wr.get_active_fixed_keywords(conn)
 
-    assert result == [{"id": 1, "keyword": "AX 시장"}, {"id": 2, "keyword": "생성형 AI"}]
+    assert result == [
+        {"id": 1, "keyword": "AX 시장", "search_terms_ko": ["AX", "AI 전환"], "search_terms_en": ["AI transformation"]},
+        {"id": 2, "keyword": "생성형 AI", "search_terms_ko": [], "search_terms_en": []},
+    ]
     query, params = cursor.executed[0]
+    assert "search_terms_ko" in query and "search_terms_en" in query
     assert "WHERE active" in query
     assert "ORDER BY display_order, id" in query
 
 
 def test_current_week_bounds_returns_monday_to_sunday():
-    # 2026-08-13은 목요일
-    monday, sunday = wr._current_week_bounds(date(2026, 8, 13))
-    assert monday == date(2026, 8, 10)
-    assert sunday == date(2026, 8, 16)
-    assert monday.weekday() == 0
-    assert sunday.weekday() == 6
+    # 2026-08-13은 목요일. Tavily 검색 자체를 이 달력 주(start_date/end_date)로
+    # 정확히 맞추므로(collectors/search_engine.py), 롤링 윈도우로 되돌아갈
+    # 필요 없이 배너 표시와 실제 검색 범위가 일치한다.
+    start, end = wr._current_week_bounds(date(2026, 8, 13))
+    assert start == date(2026, 8, 10)
+    assert end == date(2026, 8, 16)
+    assert start.weekday() == 0
+    assert end.weekday() == 6
 
 
-def test_start_weekly_run_upserts_with_computed_week_bounds():
+def test_start_weekly_run_upserts_with_computed_bounds():
     cursor = _SpyCursor(fetchone_result=(42,))
     conn = _SpyConn(cursor)
 
@@ -69,6 +80,18 @@ def test_start_weekly_run_upserts_with_computed_week_bounds():
     assert "INSERT INTO weekly_runs" in query
     assert "ON CONFLICT" in query
     assert params == (date(2026, 8, 10), date(2026, 8, 16))
+
+
+def test_get_run_period_returns_bounds():
+    cursor = _SpyCursor(fetchone_result=(date(2026, 8, 10), date(2026, 8, 16)))
+    conn = _SpyConn(cursor)
+
+    result = wr.get_run_period(conn, run_id=42)
+
+    assert result == (date(2026, 8, 10), date(2026, 8, 16))
+    query, params = cursor.executed[0]
+    assert "FROM weekly_runs" in query
+    assert params == (42,)
 
 
 def test_complete_weekly_run_updates_status():

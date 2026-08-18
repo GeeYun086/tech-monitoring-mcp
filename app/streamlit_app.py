@@ -7,8 +7,14 @@
 화면 구성:
     1. 직접 검색(큐레이션 검색엔진 라이브 호출, DB에 저장 안 함)
     2. 고정 키워드(모니터링 대상 시장) 탭
-       - 이번 주 주요 키워드(막대그래프 — 동의어 병합까지 끝난 doc_count 기준)
-       - 키워드 선택 → 관련 기사만 필터(선택 안 하면 검색엔진 원 순위로 전체 표시)
+       - 주간 이슈 기사(주요 콘텐츠) — top20 등으로 안 자르고 이번 주
+         수집분 전체를 최신순으로 보여준다(2026-08-13 담당자 확인 —
+         나중에 라벨링 작업에 쓸 예정이라 넉넉하게).
+       - 이번 주 주요 키워드는 접힌 expander(보조 지표)로 축소했다 —
+         대문자 시작 휴리스틱이라 완벽하지 않고(US·Security 같은 애매한
+         것도 섞임), 담당자가 "기사를 제대로 보여주는 쪽"에 무게를 두기로
+         확인(2026-08-13). 코드는 그대로 두어 나중에 Gemini 복구되면
+         품질을 다시 올릴 수 있게 했다.
 
 DB 연결은 .env(DATABASE_URL)에서 읽는다(config.py 경유).
 
@@ -90,15 +96,23 @@ def _render_article_list(articles: list[dict]) -> None:
             st.caption(a["snippet"])
 
 
+def _render_keyword_expander(keywords: list[dict]) -> None:
+    with st.expander("📊 이번 주 주요 키워드 (보조 지표 — 정확도 제한 있음)", expanded=False):
+        st.caption(
+            "영문은 '단어가 대문자로 시작하면 기업·기술명일 것'이라는 근사 규칙이라 "
+            "US·Security처럼 애매한 것도 섞일 수 있습니다. 정확한 개체명 인식은 아닙니다."
+        )
+        if not keywords:
+            st.info("이번 주 주요 키워드가 아직 없습니다.")
+        else:
+            top = keywords[:15]
+            st.bar_chart({k["canonical_phrase"]: k["doc_count"] for k in top})
+
+
 def _render_keyword_tab(conn, run_id: int, fixed_keyword: dict) -> None:
     keywords = dq.get_market_keywords(conn, run_id, fixed_keyword["id"])
 
-    st.markdown("**이번 주 주요 키워드**")
-    if not keywords:
-        st.info("이번 주 주요 키워드가 아직 없습니다.")
-    else:
-        top = keywords[:15]
-        st.bar_chart({k["canonical_phrase"]: k["doc_count"] for k in top})
+    _render_keyword_expander(keywords)
 
     st.markdown("**주간 이슈 기사**")
     options = ["(전체)"] + [k["canonical_phrase"] for k in keywords]
