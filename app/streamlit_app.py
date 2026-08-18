@@ -68,7 +68,7 @@ def _conn():
         st.stop()
 
 
-def _render_run_banner(run: dict | None) -> None:
+def _render_run_banner(conn, run: dict | None) -> None:
     if run is None:
         st.warning(
             "아직 수집된 데이터가 없습니다. "
@@ -77,6 +77,15 @@ def _render_run_banner(run: dict | None) -> None:
         return
     label = _STATUS_LABELS.get(run["status"], run["status"])
     st.caption(f"기준 기간: {run['period_start']} ~ {run['period_end']} · 상태: {label}")
+
+    # 소급 수집분이 섞여 있으면 그렇다고 말해준다 — 안 그러면 기준 기간보다
+    # 오래된 기사가 목록에 있는 게 기간 계산 오류처럼 보인다.
+    span = dq.get_pool_span(conn, run["id"])
+    if span["oldest"] and span["oldest"] < run["period_start"]:
+        st.caption(
+            f"↳ 최초 라벨링용 **소급 수집분 포함** — 목록의 기사 발행일은 "
+            f"{span['oldest']} ~ {span['newest']} ({span['total']}건)"
+        )
 
     # 실패를 화면에서 바로 알 수 있게(2026-08-18) — 그 전까지는 파이프라인이
     # 조용히 실패해도 "결과가 좀 적네"로만 보였다. 아래 기사 목록이 비어
@@ -413,7 +422,7 @@ def main() -> None:
 
     conn = _conn()
     run = dq.get_latest_run(conn)
-    _render_run_banner(run)
+    _render_run_banner(conn, run)
 
     _render_search_box()
     st.divider()

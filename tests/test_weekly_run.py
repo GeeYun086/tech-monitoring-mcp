@@ -125,3 +125,13 @@ def test_reset_weekly_data_truncates_weekly_runs_with_cascade():
     query, _params = cursor.executed[0]
     assert "TRUNCATE weekly_runs" in query
     assert "CASCADE" in query
+
+
+# ---- week_bounds_for: 과거 주에도 같은 기준(소급 수집·라벨 주차 그룹) ----
+
+def test_week_bounds_for_returns_monday_to_sunday():
+    assert wr.week_bounds_for(date(2026, 8, 19)) == (date(2026, 8, 17), date(2026, 8, 23))
+
+
+def test_week_bounds_for_is_stable_within_the_same_week():
+    assert wr.week_bounds_for(date(2026, 8, 17)) == wr.week_bounds_for(date(2026, 8, 23))

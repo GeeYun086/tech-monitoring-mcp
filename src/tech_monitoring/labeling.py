@@ -27,6 +27,7 @@ UI가 보여줄 때만 한다.
 """
 
 from tech_monitoring.config import settings
+from tech_monitoring.db.weekly_run import week_bounds_for
 from tech_monitoring.utils.url_normalize import normalize_url
 
 # db/migrations/004_article_labels.sql의 CHECK 제약과 같은 값이어야 한다.
@@ -37,6 +38,27 @@ VALID_LABELS = (LABEL_RELEVANT, LABEL_IRRELEVANT)
 # count_labels/fetch_all_labels에서 "사람을 가리지 말고 전부"를 뜻하는 값.
 # 실제 labeled_by 값으로는 쓰이지 않는다(005 참고).
 ALL_LABELERS = "*"
+
+
+def _label_period_start(article: dict, run_period_start):
+    """이 라벨을 어느 주로 묶을지 — **기사 발행 주**(월요일)를 쓴다.
+
+    처음엔 run의 period_start(수집한 주)를 그대로 넣었는데, 최초 라벨링용
+    소급 수집(scripts/backfill_past_weeks.py)이 지난 몇 주 기사를 이번 주
+    run에 함께 담기 때문에 그러면 전부 같은 주가 된다. 그러면
+    relevance_model.build_groups가 주차 단위로 fold를 나눌 수 없어
+    ("다음 주 기사에도 통하는가"를 재는 가장 엄격한 평가) 기사 단위 분리로
+    떨어진다. 발행 주를 쓰면 소급 수집분이 자연히 여러 주로 갈린다.
+
+    발행일이 없는 기사(Tavily가 published_date를 안 주는 경우)는 run의
+    period_start로 폴백한다 — 최소한 수집 시점은 항상 알 수 있다.
+    """
+    published = article.get("published_at")
+    if published is None:
+        return run_period_start
+    day = published.date() if hasattr(published, "date") else published
+    monday, _end = week_bounds_for(day)
+    return monday
 
 
 def _labeler(labeled_by: str | None) -> str:
@@ -172,7 +194,8 @@ def save_label(
                 fixed_keyword_id, url_norm, label,
                 article["title"], article.get("snippet"), article["url"],
                 article.get("source_domain"), article.get("published_at"),
-                article["source_table"], period_start, _labeler(labeled_by),
+                article["source_table"], _label_period_start(article, period_start),
+                _labeler(labeled_by),
             ),
         )
 

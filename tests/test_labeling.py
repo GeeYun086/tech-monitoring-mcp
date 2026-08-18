@@ -318,3 +318,30 @@ def test_fetch_all_labels_joins_keyword_text():
 
     assert row["fixed_keyword"] == "교육"
     assert row["label"] == "relevant"
+
+
+# --- 라벨의 주차 그룹(작업 4: 소급 수집) ---------------------------------
+
+def test_label_period_comes_from_article_publication_week():
+    """소급 수집분이 이번 주 run에 함께 담기므로 run 기준으로 묶으면 전부 같은
+    주가 된다 — 그러면 주차 단위로 fold를 나눌 수 없다(relevance_model.
+    build_groups). 기사 발행 주로 묶어야 소급분이 여러 주로 갈린다."""
+    conn = _FakeConn()
+    article = {**_article("https://a.com/1", published_at=datetime(2026, 8, 6)),
+               "source_table": "collected_articles"}
+
+    labeling.save_label(conn, 1, article, labeling.LABEL_RELEVANT, date(2026, 8, 17))
+
+    (params,) = conn.inserts
+    assert params[9] == date(2026, 8, 3)      # 8/6은 8/3(월) 주
+
+
+def test_label_period_falls_back_to_run_week_without_publication_date():
+    """Tavily가 published_date를 안 주는 기사도 있다 — 그때는 수집 주를 쓴다."""
+    conn = _FakeConn()
+    article = {**_article("https://a.com/1"), "source_table": "collected_articles"}
+
+    labeling.save_label(conn, 1, article, labeling.LABEL_RELEVANT, date(2026, 8, 17))
+
+    (params,) = conn.inserts
+    assert params[9] == date(2026, 8, 17)
