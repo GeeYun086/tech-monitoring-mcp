@@ -1,4 +1,12 @@
-"""검색엔진(Tavily Search API) 수집기 — v2 파이프라인의 유일한 수집 경로.
+"""검색엔진(Tavily Search API) 수집기 — 파이프라인의 유일한 수집 경로.
+
+**2026-08-19부터 수집 단위가 "시장별 검색"에서 "공용 기사 풀"로 바뀌었다**
+(db/migrations/006_tavily_shared_pool.sql 헤더에 실측 근거). 넓은 질의
+(BROAD_QUERIES_KO/EN, 코드 상수)로 화이트리스트 사이트의 그 주 기사를 모아
+collected_articles에 시장과 무관하게 저장하고, 시장별 선별은 사람 라벨로
+학습한 분류기가 맡는다. 진입점은 collect_all -> collect_pool_for_site다.
+시장별 검색어 경로(collect_for_keyword -> search_results)는 정밀도 보강용
+선택지로 남겨두되 파이프라인에서는 호출하지 않는다.
 
 배경: 원래 Google Custom Search JSON API로 설계했으나 2026-08-13 실제 연동
 중 발견 — Google이 **2025년 중반 이후 생성된 신규 계정에는 이 API 접근을
@@ -129,6 +137,30 @@ SITE_DOMAINS = [
 KOREAN_DOMAINS = {"itworld.co.kr", "aitimes.com", "news.hada.io"}
 ENGLISH_DOMAINS = {"techcrunch.com", "askedtech.com", "techmeme.com"}
 
+# collected_articles.source_name에 남길 표시 이름(v3 수집기의 관례와 같은 모양).
+SITE_NAMES = {
+    "itworld.co.kr": "ITWorld",
+    "aitimes.com": "AI타임스",
+    "news.hada.io": "GeekNews",
+    "techcrunch.com": "TechCrunch",
+    "askedtech.com": "AskedTech",
+    "techmeme.com": "Techmeme",
+}
+
+# 공용 기사 풀을 만드는 넓은 질의(006 마이그레이션 헤더 참고). **사용자가
+# 입력하는 값이 아니라 코드 상수다** — 시장 이름만 받고 쓰는 도구를 만들려면
+# "동의어를 누가 지어내는가"라는 문제를 없애야 하고, 그 답이 이 방식이다.
+#
+# 이 두 개로 실측(2026-08-18, 이틀치)한 결과가 고유 58건·5개 사이트 고르게
+# 분포였다. 시장 이름을 검색어로 쓴 직전 실행이 시장당 3~5건이었으니 물량이
+# 10배 이상 차이 난다. Tavily는 결과가 부족하면 그 도메인 최신글로 채우므로
+# 넓은 질의가 사실상 "사이트 최신글 훑기"로 동작한다.
+#
+# 늘리면 사이트당 20건(RESULTS_PER_SITE) 상한이 질의 수만큼 늘어나고 크레딧도
+# 비례해 늘어난다(질의 1개당 사이트 6개 = 6크레딧/주).
+BROAD_QUERIES_KO = ["AI", "AI 기업"]
+BROAD_QUERIES_EN = ["AI", "AI startup"]
+
 
 def _url_path_for_matching(url: str) -> str:
     """fnmatch 패턴이 "www.itworld.co.kr/article/*"처럼 스킴 없는 host+path
@@ -249,6 +281,71 @@ def _insert_result(conn, *, run_id: int, fixed_keyword_id: int, query: str, rank
         return cur.fetchone() is not None
 
 
+def broad_queries_for_domain(domain: str) -> list[str]:
+    """이 사이트에 던질 넓은 질의 목록 — 사이트 언어에 맞춰 고른다.
+    영어 사이트에 한국어 질의를 던지면 Tavily가 못 맞히고 그 도메인의 무관한
+    인기글로 채운다(003·006 헤더의 실측 기록)."""
+    return BROAD_QUERIES_KO if domain in KOREAN_DOMAINS else BROAD_QUERIES_EN
+
+
+def _insert_pool_article(conn, *, run_id: int, domain: str, query: str, item: dict) -> bool:
+    """공용 기사 풀에 저장. 시장(fixed_keyword_id)을 넣지 않는 게 핵심 —
+    "이 기사가 어느 시장에 관련 있나"는 article_keyword_relevance가 따로
+    받는다(006 헤더 참고). 컬럼 구성은 v3 수집기(rss_collector._insert_article)
+    와 같게 맞춰서, 판단·라벨링·화면이 수집 방식을 구분하지 않게 한다."""
+    url = item.get("url")
+    if not url:
+        return False
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO collected_articles
+                (run_id, source_name, fetch_method, title, url, source_domain, snippet, published_at)
+            VALUES (%s, %s, 'search', %s, %s, %s, %s, %s)
+            ON CONFLICT (run_id, url) DO NOTHING
+            RETURNING id
+            """,
+            (
+                run_id,
+                SITE_NAMES.get(domain, domain),
+                item.get("title") or "(제목 없음)",
+                normalize_url(url),
+                _extract_domain(url),
+                item.get("content"),
+                _parse_published_date(item.get("published_date")),
+            ),
+        )
+        return cur.fetchone() is not None
+
+
+def collect_pool_for_site(
+    conn, run_id: int, domain: str, start_date: date, end_date: date,
+) -> dict:
+    """사이트 하나에 넓은 질의를 각각 던져 공용 풀에 쌓는다.
+
+    한 사이트가 죽어도 다른 사이트는 계속 진행한다 — 실패는 error에 담아
+    정상 리턴하고, 파이프라인이 pipeline_report.stage_errors로 실패를 드러낸다
+    (예외를 던지면 그 주 수집이 통째로 날아간다)."""
+    name = SITE_NAMES.get(domain, domain)
+    fetched = inserted = 0
+
+    for query in broad_queries_for_domain(domain):
+        try:
+            items = _fetch_site_results(query, domain, start_date, end_date)
+        except httpx.HTTPError as exc:
+            return {"source": name, "fetched": fetched, "inserted": inserted, "error": str(exc)}
+
+        for item in items:
+            fetched += 1
+            url = item.get("url")
+            if not url or not is_allowed_url(url):
+                continue  # Tavily가 도메인은 맞혀도 경로까지는 우리가 다시 검증
+            if _insert_pool_article(conn, run_id=run_id, domain=domain, query=query, item=item):
+                inserted += 1
+
+    return {"source": name, "fetched": fetched, "inserted": inserted, "error": None}
+
+
 def _terms_for_domain(fixed_keyword: dict, domain: str) -> list[str]:
     """도메인의 언어에 맞는 검색어 목록. 둘 다 비어있으면(아직 등록 안 함)
     keyword 자체로 폴백해 기존 동작을 유지한다."""
@@ -263,8 +360,13 @@ def collect_for_keyword(
     conn, run_id: int, fixed_keyword: dict, start_date: date, end_date: date,
 ) -> dict:
     """고정 키워드 하나에 대해 (화이트리스트 사이트 × 그 언어의 검색어) 조합마다
-    개별 호출 후 저장. start_date/end_date는 이 run의 달력 주
-    (db/weekly_run.get_run_period)다."""
+    개별 호출 후 search_results에 저장. start_date/end_date는 이 run의 달력 주
+    (db/weekly_run.get_run_period)다.
+
+    **파이프라인은 이 경로를 쓰지 않는다**(2026-08-19부터 collect_pool). 시장별
+    검색어로 정밀도를 보강하고 싶을 때를 위한 선택적 경로로 남겨둔다 — 실측상
+    이 방식만으로는 시장당 3~5건이라 라벨링·학습 물량이 안 나온다(006 헤더).
+    """
     keyword = fixed_keyword["keyword"]
     fetched = inserted = 0
 
@@ -290,16 +392,25 @@ def collect_for_keyword(
 
 
 def collect_all(run_id: int) -> list[dict]:
+    """이번 주 공용 기사 풀을 만든다 — 화이트리스트 사이트마다 넓은 질의로
+    수집(006 헤더 참고).
+
+    고정 키워드를 보지 않는다: 수집은 시장과 무관하고, 시장별 선별은 나중에
+    분류기가 한다. 그래서 시장을 추가해도 재수집이 필요 없고 크레딧이 시장
+    수와 무관하다. 다만 활성 키워드가 하나도 없으면 수집해도 볼 화면이 없어
+    그대로 알린다(라벨링·판단이 전부 시장 단위라서)."""
     if not settings.tavily_api_key:
-        return [{"fixed_keyword": None, "fetched": 0, "inserted": 0, "error": "TAVILY_API_KEY 미설정 — .env 확인"}]
+        return [{"source": None, "fetched": 0, "inserted": 0, "error": "TAVILY_API_KEY 미설정 — .env 확인"}]
 
     conn = get_connection()
     try:
-        keywords = get_active_fixed_keywords(conn)
-        if not keywords:
-            return [{"fixed_keyword": None, "fetched": 0, "inserted": 0, "error": "fixed_keywords에 활성 키워드 없음"}]
+        if not get_active_fixed_keywords(conn):
+            return [{"source": None, "fetched": 0, "inserted": 0, "error": "fixed_keywords에 활성 키워드 없음"}]
         start_date, end_date = get_run_period(conn, run_id)
-        return [collect_for_keyword(conn, run_id, kw, start_date, end_date) for kw in keywords]
+        return [
+            collect_pool_for_site(conn, run_id, domain, start_date, end_date)
+            for domain in SITE_DOMAINS
+        ]
     finally:
         conn.close()
 
@@ -316,7 +427,7 @@ if __name__ == "__main__":
     _conn = get_connection()
     _errors = [r for r in _results if r["error"]]
     if _errors:
-        fail_weekly_run(_conn, _run_id, "; ".join(f"{r['fixed_keyword']}: {r['error']}" for r in _errors))
+        fail_weekly_run(_conn, _run_id, "; ".join(f"{r['source']}: {r['error']}" for r in _errors))
     else:
         complete_weekly_run(_conn, _run_id)
     _conn.close()

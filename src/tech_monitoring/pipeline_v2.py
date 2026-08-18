@@ -6,9 +6,9 @@ analysis/keyword_merge.py)에 적용한 것 — v1이 완전히 정리되면 이
 pipeline.py 자리를 대체할 예정이다.
 
 순서 고정 이유:
-    (매주 데이터 wipe) → 이번 주 run 시작 → 검색엔진 수집(고정 키워드별) →
+    (매주 데이터 wipe) → 이번 주 run 시작 → 검색엔진 수집(사이트별 공용 풀) →
         키워드 후보추출 + Gemini 동의어 병합(고정 키워드별, run 전체 한 번에)
-    수집이 끝나야 그 주 search_results가 확정되고, 그걸 기반으로 키워드
+    수집이 끝나야 그 주 collected_articles가 확정되고, 그걸 기반으로 키워드
     후보를 뽑아야 한다 — 순서가 바뀌면 지난주 데이터로 이번 주 키워드를
     뽑는 사고가 난다(v1이 겪은 "본문 백필 누락" 사고와 같은 종류의 문제라
     v1 pipeline.py처럼 순서를 코드로 고정해둔다).
@@ -35,6 +35,7 @@ run이 completed로 마감됐다(pipeline_report.py 헤더 주석 참고).
 import logging
 import time
 
+from tech_monitoring.analysis.keyword_extraction import fetch_pool_rows
 from tech_monitoring.analysis.keyword_merge import run_for_all_keywords
 from tech_monitoring.collectors.search_engine import collect_all
 from tech_monitoring.db.connection import get_connection
@@ -74,9 +75,11 @@ def _collect(run_id: int) -> dict:
 
 
 def _merge_keywords(run_id: int) -> dict:
+    """키워드 후보를 공용 기사 풀에서 뽑는다(006부터) — 기본값인
+    search_results는 이제 수집되지 않으므로 fetch_rows를 명시해야 한다."""
     conn = get_connection()
     try:
-        return {"results": run_for_all_keywords(conn, run_id)}
+        return {"results": run_for_all_keywords(conn, run_id, fetch_rows=fetch_pool_rows)}
     finally:
         conn.close()
 

@@ -11,6 +11,8 @@ _COLS_BY_TABLE = {
     "fixed_keywords": ("id", "keyword"),
     "market_keywords": ("canonical_phrase", "variant_phrases", "doc_count", "tfidf_score"),
     "search_results": ("title", "url", "snippet", "source_domain", "published_at", "rank"),
+    # 006 공용 기사 풀 — 시장(fixed_keyword_id) 컬럼이 없다.
+    "collected_articles": ("title", "url", "snippet", "source_domain", "published_at", "source_name"),
 }
 
 
@@ -49,6 +51,19 @@ class _FakeCursor:
             ]
             rows.sort(key=lambda r: (-r["doc_count"], -(r["tfidf_score"] or -1)))
             rows = rows[:limit]
+        elif table == "collected_articles":
+            run_id, *rest = params
+            rows = [r for r in self._tables.get("collected_articles", []) if r["run_id"] == run_id]
+            if "ILIKE" in query:
+                patterns, _patterns2, *rest = rest
+                needles = [p.strip("%") for p in patterns]
+                rows = [
+                    r for r in rows
+                    if any(n in r["title"] or n in (r.get("snippet") or "") for n in needles)
+                ]
+            rows = _sort_by_published_at_desc_nulls_last(rows)
+            if rest:
+                rows = rows[:rest[0]]
         elif "ILIKE" in query:
             run_id, fixed_keyword_id, patterns, _patterns2, *rest = params
             limit = rest[0] if rest else None
@@ -229,3 +244,57 @@ def test_get_latest_run_includes_error_message_for_failed_run():
     run = dq.get_latest_run(conn)
     assert run["status"] == "failed"
     assert run["error_message"] == "judge_relevance"
+
+
+# --- 006 공용 기사 풀 -------------------------------------------------------
+
+def _pool_row(url, *, run_id=1, title="제목", snippet="요약", published_at=None):
+    return {
+        "run_id": run_id, "title": title, "url": url, "snippet": snippet,
+        "source_domain": "techcrunch.com", "published_at": published_at,
+        "source_name": "TechCrunch",
+    }
+
+
+def test_get_pool_articles_returns_whole_pool_newest_first():
+    """시장 인자를 받지 않는다 — 풀은 시장과 무관하고, 세 탭이 같은 목록을
+    각자 순서로 보게 될 자리다(작업 3에서 분류기 점수로 정렬)."""
+    conn = _FakeConn(collected_articles=[
+        _pool_row("https://a.com/old", published_at=datetime(2026, 8, 17)),
+        _pool_row("https://a.com/none"),
+        _pool_row("https://a.com/new", published_at=datetime(2026, 8, 19)),
+        _pool_row("https://a.com/other-week", run_id=2),
+    ])
+
+    result = dq.get_pool_articles(conn, run_id=1)
+
+    assert [r["url"].rsplit("/", 1)[-1] for r in result] == ["new", "old", "none"]
+
+
+def test_get_pool_articles_does_not_truncate_by_default():
+    """잘라내지 않는 원칙 — 라벨링에는 무관 기사도 필요하고, 분류기가 틀려도
+    기사가 사라지면 안 된다."""
+    conn = _FakeConn(collected_articles=[_pool_row(f"https://a.com/{i}") for i in range(25)])
+
+    assert len(dq.get_pool_articles(conn, run_id=1)) == 25
+    assert len(dq.get_pool_articles(conn, run_id=1, limit=5)) == 5
+
+
+def test_get_pool_articles_for_variants_filters_by_mention():
+    conn = _FakeConn(collected_articles=[
+        _pool_row("https://a.com/1", title="생성형 AI 도입 확산"),
+        _pool_row("https://a.com/2", title="반도체 수출 증가", snippet="제너레이티브 AI 언급"),
+        _pool_row("https://a.com/3", title="무관한 소식", snippet="관련 없음"),
+    ])
+
+    result = dq.get_pool_articles_for_variants(
+        conn, run_id=1, variant_phrases=["생성형 AI", "제너레이티브 AI"],
+    )
+
+    assert {r["url"].rsplit("/", 1)[-1] for r in result} == {"1", "2"}
+
+
+def test_get_pool_articles_for_variants_returns_nothing_without_phrases():
+    conn = _FakeConn(collected_articles=[_pool_row("https://a.com/1")])
+
+    assert dq.get_pool_articles_for_variants(conn, run_id=1, variant_phrases=[]) == []
