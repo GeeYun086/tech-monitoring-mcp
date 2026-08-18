@@ -7,7 +7,7 @@ from datetime import datetime
 from tech_monitoring import dashboard_queries as dq
 
 _COLS_BY_TABLE = {
-    "weekly_runs": ("id", "period_start", "period_end", "status", "completed_at"),
+    "weekly_runs": ("id", "period_start", "period_end", "status", "completed_at", "error_message"),
     "fixed_keywords": ("id", "keyword"),
     "market_keywords": ("canonical_phrase", "variant_phrases", "doc_count", "tfidf_score"),
     "search_results": ("title", "url", "snippet", "source_domain", "published_at", "rank"),
@@ -72,7 +72,7 @@ class _FakeCursor:
             if limit is not None:
                 rows = rows[:limit]
 
-        self._rows = [tuple(r[c] for c in cols) for r in rows]
+        self._rows = [tuple(r.get(c) for c in cols) for r in rows]
 
     def fetchone(self):
         return self._rows[0] if self._rows else None
@@ -218,3 +218,14 @@ def test_get_search_results_truncates_long_snippet():
     ])
     result = dq.get_search_results(conn, run_id=1, fixed_keyword_id=10)
     assert len(result[0]["snippet"]) <= dq._SUMMARY_MAX_CHARS + 1
+
+
+def test_get_latest_run_includes_error_message_for_failed_run():
+    """실패 사유를 화면에 띄우려면 조회에 error_message가 포함돼야 한다(2026-08-18)."""
+    conn = _FakeConn(weekly_runs=[
+        {"id": 3, "period_start": "2026-08-17", "period_end": "2026-08-23",
+         "status": "failed", "completed_at": None, "error_message": "judge_relevance"},
+    ])
+    run = dq.get_latest_run(conn)
+    assert run["status"] == "failed"
+    assert run["error_message"] == "judge_relevance"

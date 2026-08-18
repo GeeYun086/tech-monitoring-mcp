@@ -68,3 +68,21 @@ def test_run_pipeline_returns_run_id_from_start_run(monkeypatch):
     report = pipeline_v2.run_pipeline()
 
     assert report["run_id"] == 7
+
+
+def test_stage_returning_item_errors_is_counted_as_failed(monkeypatch):
+    """2026-08-18 회귀 방지 — TAVILY_API_KEY 미설정처럼 한 건도 못 가져온
+    경우에도 collect_all은 예외 없이 "error"만 담아 리턴한다. 그걸 실패로
+    안 세면 빈 주가 completed로 조용히 마감된다(v3와 같은 사고)."""
+    monkeypatch.setattr(pipeline_v2, "_start_run", lambda: 99)
+    monkeypatch.setattr(pipeline_v2, "_collect", lambda run_id: {"results": [
+        {"fixed_keyword": None, "fetched": 0, "inserted": 0, "error": "TAVILY_API_KEY 미설정 — .env 확인"},
+    ]})
+    monkeypatch.setattr(pipeline_v2, "_merge_keywords", lambda run_id: {"results": []})
+    finish_calls = []
+    monkeypatch.setattr(pipeline_v2, "_finish_run", lambda run_id, failed: finish_calls.append((run_id, failed)))
+
+    report = pipeline_v2.run_pipeline()
+
+    assert report["failed"] == ["collect"]
+    assert finish_calls == [(99, ["collect"])]

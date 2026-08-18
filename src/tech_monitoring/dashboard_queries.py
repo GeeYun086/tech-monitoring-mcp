@@ -52,7 +52,9 @@ def get_latest_run(conn) -> dict | None:
     """가장 최근 weekly_run. 매주 전체 wipe 방침이라 사실상 이번 주 run이 유일하다."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, period_start, period_end, status, completed_at "
+            # error_message도 함께 — 실패한 단계 이름이 화면에 드러나야
+            # "결과가 왜 비었지?"를 로그 뒤지지 않고 알 수 있다(2026-08-18).
+            "SELECT id, period_start, period_end, status, completed_at, error_message "
             "FROM weekly_runs ORDER BY id DESC LIMIT 1"
         )
         row = cur.fetchone()

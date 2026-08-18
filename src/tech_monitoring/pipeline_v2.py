@@ -24,6 +24,11 @@ reset_weekly_data()로 지난주 데이터를 통째로 비운 뒤 이번 주 ru
 run_id 없이는 뒤 단계가 결과를 어디에도 쓸 수 없으므로 여기서 실패하면
 그대로 예외를 올린다.
 
+"실패"의 정의는 예외만이 아니다(2026-08-18 수정) — 단계가 정상 리턴했더라도
+결과 항목에 error가 섞여 있으면 부분 실패로 세서 failed에 넣는다. 그 전까지는
+TAVILY_API_KEY 미설정처럼 한 건도 못 가져온 경우에도 "collect ok"가 찍히고
+run이 completed로 마감됐다(pipeline_report.py 헤더 주석 참고).
+
     ./.venv/Scripts/python.exe -m tech_monitoring.pipeline_v2
 """
 
@@ -39,6 +44,7 @@ from tech_monitoring.db.weekly_run import (
     reset_weekly_data,
     start_weekly_run,
 )
+from tech_monitoring.pipeline_report import stage_errors
 
 logger = logging.getLogger("tech_monitoring.pipeline_v2")
 
@@ -95,12 +101,25 @@ def run_pipeline() -> dict:
         started = time.monotonic()
         try:
             result = fn()
-            results[name] = result
-            logger.info("%s ok (%.1fs): %s", name, time.monotonic() - started, result)
         except Exception as exc:
             failed.append(name)
             results[name] = {"error": f"{type(exc).__name__}: {exc}"}
             logger.error("%s FAILED (%.1fs): %s", name, time.monotonic() - started, exc)
+            continue
+
+        # 예외가 안 났어도 끝난 게 아니다 — collect는 TAVILY_API_KEY가
+        # 비어 한 건도 못 가져와도 각 항목의 "error"에 사유만 담아 정상
+        # 리턴한다. 그걸 실패로 안 세면 빈 주가 completed로 마감된다
+        # (pipeline_report.py 헤더 주석 참고).
+        results[name] = result
+        errors = stage_errors(result)
+        if errors:
+            failed.append(name)
+            logger.error(
+                "%s FAILED (%.1fs): %s", name, time.monotonic() - started, "; ".join(errors),
+            )
+        else:
+            logger.info("%s ok (%.1fs): %s", name, time.monotonic() - started, result)
 
     _finish_run(run_id, failed)
 

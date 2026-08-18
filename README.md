@@ -100,7 +100,7 @@ Streamlit UI가 생기기 전까지는 CLI로 관리한다.
 v3 나란히 비교하려고 의도적으로 그렇게 만듦, `pipeline_v3.py` 모듈 docstring
 참고). v2가 이번 주 run을 시작(및 wipe)해두면 v3는 그 위에 올라타기만 한다.
 
-순서: 재선정 사이트 4개 수집(RSS 2 + 스크래핑 2) → LLM 적합성 판단(고정
+순서: 재선정 사이트 4개 수집(RSS 2 + 스크래핑 2) → 적합성 판단(고정
 키워드별) → 키워드 후보추출 + Gemini 동의어 병합(`pipeline='rss_llm'`로
 저장). 개별 단계:
 
@@ -108,8 +108,38 @@ v3 나란히 비교하려고 의도적으로 그렇게 만듦, `pipeline_v3.py` 
 ./.venv/Scripts/python.exe -m tech_monitoring.collectors.rss_collector       # Techmeme·TechCrunch
 ./.venv/Scripts/python.exe -m tech_monitoring.collectors.geeknews_weekly     # 스크래핑
 ./.venv/Scripts/python.exe -m tech_monitoring.collectors.aitimes_scraper    # 스크래핑
-./.venv/Scripts/python.exe -m tech_monitoring.analysis.relevance_filter     # LLM 적합성 판단
+./.venv/Scripts/python.exe -m tech_monitoring.analysis.relevance_filter     # 적합성 판단
 ```
+
+## 관련도 판단 — 사람 라벨 기반 분류기 (2026-08-18)
+
+적합성 판단은 원래 Gemini 전담이었는데, **한 번 막히면 그 주 관련 기사가
+통째로 0건**이 되는 구조였다(그게 "결과가 흐지부지된다"의 직접 원인).
+그래서 담당자가 직접 매긴 라벨로 로컬 분류기를 학습해 대체한다 — API 호출이
+0이라 429·크레딧 상태와 무관하다.
+
+```bash
+./.venv/Scripts/python.exe -m streamlit run app/streamlit_app.py   # 🏷️ 라벨링 → 📈 성능 탭
+./.venv/Scripts/python.exe scripts/train_relevance_classifier.py   # CLI로도 같은 채점
+```
+
+1. **라벨링** — 기사 하나씩 "도움이 되는 기사예요 / 도움이 되지 않는 기사예요".
+   라벨 단위는 기사가 아니라 **"기사 × 고정 키워드" 쌍**이다(같은 기사가
+   "교육"엔 도움돼도 "비즈니스 실적"엔 무관할 수 있다 — 실측상 후보 262건 중
+   56개 URL이 여러 키워드에 걸쳐 있다).
+2. **채점** — 문자 n-gram TF-IDF와 다국어 문장 임베딩 두 방식을 같은 조건으로
+   교차검증해 이긴 쪽을 `models/relevance_classifier.joblib`에 저장한다.
+   fold는 그룹 단위로 나눈다: 라벨이 두 주 이상이면 **주차 단위**로 나눠
+   "다음 주에도 통하는가"를 직접 재고, 한 주뿐이면 같은 기사가 학습·검증에
+   갈리는 누수만 막는다.
+3. **적용** — `relevance_filter.judge_all`이 저장된 모델을 자동으로 집어 쓰고,
+   없으면 Gemini로 폴백한다. 어느 쪽으로 판단했는지는 결과의 `method`
+   (`classifier:tfidf` / `gemini`)에 남는다.
+
+정확도는 **항상 "찍기 기준선"과 나란히** 본다 — 라벨이 한쪽으로 쏠리면
+"무조건 도움됨"이라고만 답하는 분류기도 정확도가 높게 나와 단독 수치는
+착시다. 화면에도 `+0.000 vs 찍기` 형태로 함께 표시하고, 기준선을 못 넘으면
+모델을 저장하지 않는다.
 
 ## 대시보드
 
@@ -135,7 +165,8 @@ DB 연결 실패(Supabase 무료 티어는 7일 미사용 시 자동 일시정�
 | `weekly_runs` | 주간 배치 실행 메타. 다른 수집 테이블은 전부 이 테이블에 cascade 연결 | 예(wipe 트리거) |
 | `search_results` | v2: 검색엔진에서 가져온 이번 주 원본 기사(top20 고정 없음) | 예 |
 | `collected_articles` | v3: 재선정 사이트 4개에서 통째로 수집한 원본(고정 키워드 무관) | 예 |
-| `article_keyword_relevance` | v3: LLM의 "이 글 ↔ 이 고정 키워드 관련도" 판단(다대다) | 예 |
+| `article_keyword_relevance` | v3: "이 글 ↔ 이 고정 키워드 관련도" 판단(다대다) | 예 |
+| `article_labels` | 사람이 매긴 관련도 라벨(분류기 학습 데이터). `weekly_runs`를 참조하지 않고 원문을 스냅샷으로 복사해 둔다 | **아니오 — 학습 자산** |
 | `market_keywords` | v2/v3 공용 — "이번 주 주요 키워드" 최종 목록. `pipeline` 컬럼(`search_engine`/`rss_llm`)으로 구분 | 예 |
 
 `market_keywords.canonical_phrase` + `variant_phrases`(병합된 원본 표기들,
@@ -188,29 +219,46 @@ src/tech_monitoring/
   collectors/aitimes_scraper.py   # v3: AI타임스 AI산업 섹션 스크래핑(RSS 없음)
   analysis/keyword_extraction.py  # TF-IDF 후보 추출(코드, 정확한 카운팅) — v2/v3 공용
   analysis/keyword_merge.py       # Gemini 동의어 병합 + market_keywords 확정 — v2/v3 공용
-  analysis/relevance_filter.py    # v3: LLM 기반 기사-고정키워드 적합성 판단
+  analysis/relevance_filter.py    # v3: 기사-고정키워드 적합성 판단(분류기 우선, Gemini 폴백)
+  labeling.py                     # 사람 라벨 저장/조회(라벨링 화면 ↔ article_labels)
+  relevance_model.py              # 라벨로 분류기 학습 + 교차검증 채점(계산 전담)
+  pipeline_report.py              # 단계 결과의 항목별 error를 실패로 집계(조용한 실패 차단)
   llm_client.py                   # Gemini 호출 공용 wrapper(keyword_merge·relevance_filter 공유)
   utils/keyword_text.py           # 구(phrase)+TF-IDF 로직(v1에서 이관, 실사용 검증 완료)
   db/connection.py, db/migrate.py, db/weekly_run.py
   pipeline_v2.py                  # v2 오케스트레이터(매주 wipe 담당)
   pipeline_v3.py                  # v3 오케스트레이터(wipe 안 함 — v2 이후 실행)
-db/migrations/          # v2(001) + v3(002) 스키마
+db/migrations/          # v2(001) + v3(002) + 검색어(003) + 라벨(004) 스키마
 db/migrations_v1_archive/  # v1 스키마(참고용, 더 이상 적용 안 됨)
 scripts/manage_fixed_keywords.py
+scripts/train_relevance_classifier.py   # 라벨 → 분류기 학습 + 성능 출력
+models/                 # 학습된 분류기(.joblib, git 추적 안 함 — 라벨에서 재생성)
 ```
 
 ## 진행 현황
 
 - v2: 수집(검색엔진) → 후보추출(TF-IDF) → 병합(Gemini) → 오케스트레이터까지 완료,
   실제 Tavily 연동 검증 완료(2026-08-13).
-- v3: 수집(RSS 2 + 스크래핑 2) → LLM 적합성 판단 → 후보추출·병합 재사용 →
+- v3: 수집(RSS 2 + 스크래핑 2) → 적합성 판단 → 후보추출·병합 재사용 →
   오케스트레이터까지 완료, 실제 사이트 연동 검증 완료(2026-08-13, 4개 소스
-  전부 수집 성공 — Gemini 판단 단계는 계정 쪽 429로 대기 중, 코드 자체는
-  실패 격리까지 확인됨).
+  전부 수집 성공).
+- **조용한 실패 차단(2026-08-18)**: 각 단계는 개별 항목이 실패해도 예외 대신
+  결과의 `error` 필드로만 알리는 관례라, 예외만 보던 오케스트레이터가 Gemini
+  전면 실패·`TAVILY_API_KEY` 미설정 같은 상황을 `ok`로 넘기고 run을
+  `completed`로 마감하고 있었다. `pipeline_report.stage_errors`로 항목별
+  error를 실패로 집계하고, 대시보드 상단에도 실패 배너를 띄운다.
+- **관련도 분류기(2026-08-18)**: 라벨 테이블·라벨링 화면·학습/채점(교차검증,
+  찍기 기준선 비교, Precision@K·NDCG@K)·파이프라인 연결까지 코드 완료.
+  라벨 수집은 진행 전이라 실측 성능은 아직 없다(라벨 30건부터 측정 가능).
 - v1 코드(수집기·필터 5단계·MCP 서버·대시보드 데이터 스크립트) 정리 완료.
 - Streamlit 대시보드(고정 키워드 탭 + 주요 키워드 랭킹 + 키워드별 주간 기사
   목록 + 직접 검색창)까지 완료 — 다만 v2 전용(v3의 `pipeline='rss_llm'` 결과는
   아직 화면에 안 붙임).
-- **다음**: (1) Gemini 429 풀리면 v3 relevance_filter·merge 단계 실측, (2) v2
-  vs v3 비교를 대시보드에서 보여주는 화면, (3) Claude 연결용 MCP는 v2/v3
-  스키마 기준으로 아직 재구축 전(당분간 공백).
+- **다음**: (1) 라벨 수집(대시보드 🏷️ 라벨링 탭 — 현재 후보 262건) 후
+  📈 성능 탭에서 실측, (2) v2 vs v3 비교를 대시보드에서 보여주는 화면,
+  (3) Claude 연결용 MCP는 v2/v3 스키마 기준으로 아직 재구축 전(당분간 공백).
+
+> ⚠️ `pipeline_v2`는 시작할 때 지난주 데이터를 통째로 지운다(`TRUNCATE
+> weekly_runs CASCADE`). **라벨링할 후보가 남아 있으면 파이프라인을 돌리기
+> 전에 라벨링을 끝내야 한다** — 라벨 자체는 스냅샷이라 안전하지만, 아직
+> 라벨 안 한 기사는 사라진다.

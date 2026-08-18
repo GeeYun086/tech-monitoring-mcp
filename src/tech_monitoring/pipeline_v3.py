@@ -25,6 +25,12 @@ collected_articles가 확정되고, 그걸 기반으로 관련도 판단을 해�
 실패 격리 원칙도 동일: 한 단계가 실패해도 나머지는 계속 진행하고, 실패한
 단계는 report의 "failed"에 남는다.
 
+"실패"의 정의는 예외만이 아니다(2026-08-18 수정) — 단계가 정상 리턴했더라도
+결과 항목에 error가 섞여 있으면 부분 실패로 세서 failed에 넣는다. 그 전까지는
+Gemini 429로 모든 고정 키워드의 관련도 판단이 죽어도(그 주 관련 기사 0건이
+돼도) "judge_relevance ok"가 찍히고 run이 completed로 마감됐다
+(pipeline_report.py 헤더 주석 참고).
+
     ./.venv/Scripts/python.exe -m tech_monitoring.pipeline_v3
 """
 
@@ -36,6 +42,7 @@ from tech_monitoring.analysis.relevance_filter import fetch_relevant_articles, j
 from tech_monitoring.collectors import aitimes_scraper, geeknews_weekly, rss_collector
 from tech_monitoring.db.connection import get_connection
 from tech_monitoring.db.weekly_run import complete_weekly_run, fail_weekly_run, start_weekly_run
+from tech_monitoring.pipeline_report import stage_errors
 
 logger = logging.getLogger("tech_monitoring.pipeline_v3")
 
@@ -109,12 +116,25 @@ def run_pipeline() -> dict:
         started = time.monotonic()
         try:
             result = fn()
-            results[name] = result
-            logger.info("%s ok (%.1fs): %s", name, time.monotonic() - started, result)
         except Exception as exc:
             failed.append(name)
             results[name] = {"error": f"{type(exc).__name__}: {exc}"}
             logger.error("%s FAILED (%.1fs): %s", name, time.monotonic() - started, exc)
+            continue
+
+        # 예외가 안 났어도 끝난 게 아니다 — judge_relevance는 Gemini가
+        # 429로 전부 죽어도 각 항목의 "error"에 사유만 담아 정상 리턴한다.
+        # 그걸 실패로 안 세면 "관련 기사 0건"인 주가 completed로 마감된다
+        # (pipeline_report.py 헤더 주석 참고).
+        results[name] = result
+        errors = stage_errors(result)
+        if errors:
+            failed.append(name)
+            logger.error(
+                "%s FAILED (%.1fs): %s", name, time.monotonic() - started, "; ".join(errors),
+            )
+        else:
+            logger.info("%s ok (%.1fs): %s", name, time.monotonic() - started, result)
 
     _finish_run(run_id, failed)
 

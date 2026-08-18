@@ -89,3 +89,61 @@ def test_start_run_does_not_reset_weekly_data(monkeypatch):
     pipeline_v3._start_run()
 
     assert calls == []
+
+
+def test_stage_returning_item_errors_is_counted_as_failed(monkeypatch):
+    """2026-08-18 회귀 방지 — Gemini 429로 관련도 판단이 전부 죽어도 예외는
+    안 나고 각 항목 "error"에 사유만 담겨 돌아온다. 그걸 실패로 안 세면
+    "관련 기사 0건"인 주가 completed로 조용히 마감된다."""
+    monkeypatch.setattr(pipeline_v3, "_start_run", lambda: 99)
+    monkeypatch.setattr(pipeline_v3, "_collect", lambda run_id: {"results": [
+        {"source": "Techmeme", "fetched": 30, "inserted": 30, "error": None},
+    ]})
+    monkeypatch.setattr(pipeline_v3, "_judge_relevance", lambda run_id: {"results": [
+        {"fixed_keyword": "AI 교육", "judged": 0, "relevant": 0, "error": "ClientError: 429"},
+    ]})
+    monkeypatch.setattr(pipeline_v3, "_merge_keywords", lambda run_id: {"results": []})
+    finish_calls = []
+    monkeypatch.setattr(pipeline_v3, "_finish_run", lambda run_id, failed: finish_calls.append((run_id, failed)))
+
+    report = pipeline_v3.run_pipeline()
+
+    assert report["failed"] == ["judge_relevance"]
+    # 실패로 세더라도 결과 자체는 report에 그대로 남아야 한다(사유 추적용).
+    assert report["stages"]["judge_relevance"]["results"][0]["error"] == "ClientError: 429"
+    # weekly_runs를 'failed'로 마감시키는 경로까지 이어져야 대시보드에 드러난다.
+    assert finish_calls == [(99, ["judge_relevance"])]
+
+
+def test_partial_collector_failure_is_counted_as_failed(monkeypatch):
+    """RSS 피드 하나만 죽어도 실패로 잡는다 — 조용히 넘어가 몇 주를 놓치는
+    것보다 과하게 알리는 쪽이 낫다는 판단(pipeline_report.py 헤더 참고)."""
+    monkeypatch.setattr(pipeline_v3, "_start_run", lambda: 99)
+    monkeypatch.setattr(pipeline_v3, "_collect", lambda run_id: {"results": [
+        {"source": "Techmeme", "fetched": 30, "inserted": 30, "error": None},
+        {"source": "AI타임스", "fetched": 0, "inserted": 0, "error": "ReadTimeout"},
+    ]})
+    monkeypatch.setattr(pipeline_v3, "_judge_relevance", lambda run_id: {"results": []})
+    monkeypatch.setattr(pipeline_v3, "_merge_keywords", lambda run_id: {"results": []})
+    monkeypatch.setattr(pipeline_v3, "_finish_run", lambda run_id, failed: None)
+
+    report = pipeline_v3.run_pipeline()
+
+    assert report["failed"] == ["collect"]
+
+
+def test_all_stages_clean_still_completes(monkeypatch):
+    """error가 전부 None이면 예전처럼 성공으로 마감돼야 한다(오탐 방지)."""
+    monkeypatch.setattr(pipeline_v3, "_start_run", lambda: 99)
+    monkeypatch.setattr(pipeline_v3, "_collect", lambda run_id: {"results": [
+        {"source": "Techmeme", "fetched": 30, "inserted": 30, "error": None},
+    ]})
+    monkeypatch.setattr(pipeline_v3, "_judge_relevance", lambda run_id: {"results": [
+        {"fixed_keyword": "AI 교육", "judged": 30, "relevant": 8, "error": None},
+    ]})
+    monkeypatch.setattr(pipeline_v3, "_merge_keywords", lambda run_id: {"results": [
+        {"fixed_keyword": "AI 교육", "groups": 12, "inserted": 12},
+    ]})
+    monkeypatch.setattr(pipeline_v3, "_finish_run", lambda run_id, failed: None)
+
+    assert pipeline_v3.run_pipeline()["failed"] == []
