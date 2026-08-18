@@ -377,15 +377,15 @@ def _render_keyword_tab(conn, run_id: int, fixed_keyword: dict) -> None:
         "키워드로 기사 필터링", options, key=f"kw_select_{fixed_keyword['id']}",
     )
 
+    # 006부터 기사는 시장과 무관한 공용 풀에서 온다 — 세 탭이 같은 목록을
+    # 보여주고, 시장별 순서는 분류기 점수가 붙으면 갈라진다(작업 3).
     if selected == "(전체)":
-        articles = dq.get_search_results(conn, run_id, fixed_keyword["id"])
+        articles = dq.get_pool_articles(conn, run_id)
     else:
         variant_phrases = next(
             k["variant_phrases"] for k in keywords if k["canonical_phrase"] == selected
         )
-        articles = dq.get_search_results_for_variants(
-            conn, run_id, fixed_keyword["id"], variant_phrases,
-        )
+        articles = dq.get_pool_articles_for_variants(conn, run_id, variant_phrases)
 
     st.caption(f"{len(articles)}건")
     _render_article_list(articles)

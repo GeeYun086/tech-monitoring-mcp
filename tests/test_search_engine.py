@@ -12,15 +12,23 @@ _START = date(2026, 8, 10)
 _END = date(2026, 8, 16)
 
 
+# INSERT 문의 url 위치 — 두 저장 경로의 컬럼 순서가 다르다.
+#   search_results     : (run_id, fixed_keyword_id, query, rank, title, url, ...)
+#   collected_articles : (run_id, source_name, title, url, ...)  ← 006 공용 풀
+_URL_INDEX = {"search_results": 5, "collected_articles": 3}
+
+
 class _FakeCursor:
-    """INSERT INTO search_results ... RETURNING id 만 이해하는 최소 스텁.
-    UNIQUE(run_id, fixed_keyword_id, url) ON CONFLICT DO NOTHING을
+    """INSERT ... RETURNING id 만 이해하는 최소 스텁. ON CONFLICT DO NOTHING을
     inserted_urls 집합으로 흉내낸다 — 이미 있으면 fetchone()이 None(=미삽입)."""
 
-    def __init__(self, inserted_urls: set[str], inserted_params: list[tuple]):
+    def __init__(self, inserted_urls: set[str], inserted_params: list[tuple],
+                 inserted_titles: set[str]):
         self._inserted_urls = inserted_urls
+        self._inserted_titles = inserted_titles
         self._inserted_params = inserted_params
         self._last_params = None
+        self._url_index = None
 
     def __enter__(self):
         return self
@@ -29,14 +37,20 @@ class _FakeCursor:
         return False
 
     def execute(self, query, params=None):
-        assert "INSERT INTO search_results" in query
-        self._last_params = params  # (run_id, fixed_keyword_id, query, rank, title, url, ...)
+        table = next((t for t in _URL_INDEX if f"INSERT INTO {t}" in query), None)
+        assert table is not None, f"스텁이 모르는 질의: {query}"
+        self._url_index = _URL_INDEX[table]
+        self._last_params = params
 
     def fetchone(self):
-        url = self._last_params[5]
-        if url in self._inserted_urls:
+        url = self._last_params[self._url_index]
+        # 공용 풀 INSERT는 제목 중복도 막는다(WHERE NOT EXISTS) — 스텁도 같게.
+        title = self._last_params[2] if self._url_index == 3 else None
+        if url in self._inserted_urls or (title is not None and title in self._inserted_titles):
             return None
         self._inserted_urls.add(url)
+        if title is not None:
+            self._inserted_titles.add(title)
         self._inserted_params.append(self._last_params)
         return (1,)
 
@@ -44,10 +58,11 @@ class _FakeCursor:
 class _FakeConn:
     def __init__(self):
         self.inserted_urls: set[str] = set()
+        self.inserted_titles: set[str] = set()
         self.inserted_params: list[tuple] = []
 
     def cursor(self):
-        return _FakeCursor(self.inserted_urls, self.inserted_params)
+        return _FakeCursor(self.inserted_urls, self.inserted_params, self.inserted_titles)
 
     def close(self):
         pass
@@ -293,8 +308,10 @@ def test_collect_all_reports_missing_credentials(monkeypatch):
     assert "TAVILY_API_KEY" in results[0]["error"]
 
 
-def test_collect_all_passes_run_period_to_each_keyword(monkeypatch):
-    """이 run의 달력 주(get_run_period)를 조회해 모든 고정 키워드 수집에 그대로 넘겨야 한다."""
+def test_collect_all_collects_per_site_not_per_keyword(monkeypatch):
+    """006 — 수집은 시장과 무관한 공용 풀이다. 사이트마다 한 번씩 돌고,
+    이 run의 달력 주(get_run_period)를 그대로 넘긴다. 고정 키워드가 늘어도
+    호출 수가 늘지 않는 게 핵심(크레딧이 시장 수와 무관해진다)."""
     monkeypatch.setattr(search_engine.settings, "tavily_api_key", "key")
     monkeypatch.setattr(search_engine, "get_connection", lambda: _FakeConn())
     monkeypatch.setattr(search_engine, "get_active_fixed_keywords", lambda conn: [
@@ -304,10 +321,191 @@ def test_collect_all_passes_run_period_to_each_keyword(monkeypatch):
 
     calls = []
     monkeypatch.setattr(
-        search_engine, "collect_for_keyword",
-        lambda conn, run_id, kw, start_date, end_date: calls.append((kw["keyword"], start_date, end_date)),
+        search_engine, "collect_pool_for_site",
+        lambda conn, run_id, domain, start_date, end_date: calls.append((domain, start_date, end_date)),
     )
 
     search_engine.collect_all(run_id=1)
 
-    assert calls == [("에이전트 도입", _START, _END), ("교육", _START, _END)]
+    assert calls == [(d, _START, _END) for d in search_engine.SITE_DOMAINS]
+
+
+def test_collect_all_still_needs_an_active_market(monkeypatch):
+    """풀 자체는 시장과 무관하지만, 활성 키워드가 없으면 라벨링·판단·화면이
+    전부 성립하지 않으므로 조용히 넘어가지 않고 실패로 알린다."""
+    monkeypatch.setattr(search_engine.settings, "tavily_api_key", "key")
+    monkeypatch.setattr(search_engine, "get_connection", lambda: _FakeConn())
+    monkeypatch.setattr(search_engine, "get_active_fixed_keywords", lambda conn: [])
+
+    (result,) = search_engine.collect_all(run_id=1)
+
+    assert "활성 키워드 없음" in result["error"]
+
+
+# ---- collect_pool_for_site (006 공용 풀) ----
+
+def test_pool_queries_each_broad_query_once_per_site(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        search_engine, "_fetch_site_results",
+        lambda term, domain, start, end: calls.append((term, domain)) or [],
+    )
+
+    search_engine.collect_pool_for_site(_FakeConn(), 1, "techcrunch.com", _START, _END)
+
+    assert calls == [(q, "techcrunch.com") for q in search_engine.BROAD_QUERIES_EN]
+
+
+def test_pool_uses_korean_queries_for_korean_sites(monkeypatch):
+    """영어 사이트에 한국어 질의를 던지면 Tavily가 그 도메인 무관 인기글로
+    채운다(003·006 실측) — 그래서 사이트 언어에 맞춰 질의를 고른다."""
+    calls = []
+    monkeypatch.setattr(
+        search_engine, "_fetch_site_results",
+        lambda term, domain, start, end: calls.append(term) or [],
+    )
+
+    search_engine.collect_pool_for_site(_FakeConn(), 1, "aitimes.com", _START, _END)
+
+    assert calls == search_engine.BROAD_QUERIES_KO
+
+
+def test_pool_stores_without_market_and_marks_fetch_method(monkeypatch):
+    """공용 풀 행에는 시장이 없다 — source_name/fetch_method='search'로 저장되고
+    "이 기사가 어느 시장에 관련 있나"는 나중에 별도 표가 받는다."""
+    monkeypatch.setattr(
+        search_engine, "_fetch_site_results",
+        lambda term, domain, start, end: [_item("https://techcrunch.com/2026/08/13/a/")],
+    )
+    conn = _FakeConn()
+
+    search_engine.collect_pool_for_site(conn, 7, "techcrunch.com", _START, _END)
+
+    (params, *_) = conn.inserted_params
+    assert params[0] == 7                                    # run_id
+    assert params[1] == "TechCrunch"                          # source_name(표시 이름)
+    assert params[3] == "https://techcrunch.com/2026/08/13/a" # 정규화된 url
+    assert 1 not in params[:2]                                # fixed_keyword_id 자리가 없다
+
+
+def test_pool_stores_only_allowed_urls(monkeypatch):
+    monkeypatch.setattr(search_engine, "_fetch_site_results", lambda term, domain, start, end: [
+        _item("https://techcrunch.com/2026/08/13/ok/"),
+        _item("https://techcrunch.com/tag/ai/"),      # exclude 패턴
+        _item("https://evil.example.com/story"),      # 화이트리스트 외
+    ])
+
+    result = search_engine.collect_pool_for_site(_FakeConn(), 1, "techcrunch.com", _START, _END)
+
+    assert result["inserted"] == 1
+    assert result["fetched"] == 6   # 질의 2개 × 3건 — 걸러낸 것도 가져온 건 맞다
+
+
+def test_pool_dedups_same_article_across_broad_queries(monkeypatch):
+    """넓은 질의 여러 개가 같은 기사를 물어오는 건 정상 — UNIQUE (run_id, url)로
+    한 번만 저장된다."""
+    monkeypatch.setattr(
+        search_engine, "_fetch_site_results",
+        lambda term, domain, start, end: [_item("https://techcrunch.com/2026/08/13/same/")],
+    )
+
+    result = search_engine.collect_pool_for_site(_FakeConn(), 1, "techcrunch.com", _START, _END)
+
+    assert (result["fetched"], result["inserted"]) == (2, 1)
+
+
+def test_pool_returns_error_on_http_failure_without_raising(monkeypatch):
+    """한 사이트가 죽어도 나머지 사이트는 계속 진행해야 하므로 예외를 올리지
+    않고 error에 담아 리턴한다(파이프라인이 stage_errors로 드러낸다)."""
+    def _boom(term, domain, start, end):
+        raise httpx.ConnectError("boom")
+
+    monkeypatch.setattr(search_engine, "_fetch_site_results", _boom)
+
+    result = search_engine.collect_pool_for_site(_FakeConn(), 1, "aitimes.com", _START, _END)
+
+    assert result["source"] == "AI타임스"
+    assert "boom" in result["error"]
+
+
+# ---- derive_title: 제목이 사이트 이름뿐일 때 스니펫으로 대체 ----
+# Techmeme 실측(2026-08-19) — 42건 중 11건이 제목이 "Techmeme"뿐이라
+# 라벨링 카드에서 사람이 판단할 수 없었다.
+
+def test_derive_title_keeps_real_titles():
+    item = {"title": "Anthropic revenue surges to $65B", "content": "본문 요약"}
+
+    assert search_engine.derive_title(item, "techcrunch.com") == "Anthropic revenue surges to $65B"
+
+
+@pytest.mark.parametrize("title", ["Techmeme", "techmeme", "techmeme.com", "", "(제목 없음)"])
+def test_derive_title_replaces_site_name_with_snippet(title):
+    item = {"title": title, "content": "Palona raised a $20M round"}
+
+    assert search_engine.derive_title(item, "techmeme.com") == "Palona raised a $20M round"
+
+
+def test_derive_title_strips_source_attribution():
+    """Techmeme 스니펫은 "기자 / 매체: 헤드라인" 모양이라 앞머리를 떼야
+    제목이 읽힌다."""
+    item = {"title": "Techmeme", "content": "Mike Wheatley / SiliconANGLE:   Palona raised $20M"}
+
+    assert search_engine.derive_title(item, "techmeme.com") == "Palona raised $20M"
+
+
+def test_derive_title_keeps_colons_that_are_part_of_the_sentence():
+    """본문 콜론까지 지우면 내용이 날아간다 — "@"나 " / "가 있는 출처 표기만 뗀다."""
+    item = {"title": "Techmeme", "content": "속보: 오픈AI가 데이터센터를 늘린다"}
+
+    assert search_engine.derive_title(item, "techmeme.com") == "속보: 오픈AI가 데이터센터를 늘린다"
+
+
+def test_derive_title_truncates_long_snippets_at_word_boundary():
+    item = {"title": "Techmeme", "content": "word " * 60}
+
+    result = search_engine.derive_title(item, "techmeme.com")
+
+    assert len(result) <= search_engine.DERIVED_TITLE_MAX + 1   # 말줄임표 한 글자
+    assert result.endswith("…")
+    assert not result.endswith(" …")
+
+
+def test_derive_title_falls_back_when_snippet_is_missing_too():
+    """조용히 행을 버리지 않는다 — 어떤 후보도 사라지면 안 된다는 기존 원칙."""
+    assert search_engine.derive_title({"title": "Techmeme", "content": ""}, "techmeme.com") == "(제목 없음)"
+
+
+def test_pool_insert_uses_derived_title(monkeypatch):
+    monkeypatch.setattr(search_engine, "_fetch_site_results", lambda term, domain, start, end: [
+        {"url": "https://www.techmeme.com/260819/p1", "title": "Techmeme",
+         "content": "Mike Wheatley / SiliconANGLE: Palona raised $20M"},
+    ])
+    conn = _FakeConn()
+
+    search_engine.collect_pool_for_site(conn, 1, "techmeme.com", _START, _END)
+
+    (params,) = conn.inserted_params
+    assert params[2] == "Palona raised $20M"   # title 자리
+
+
+def test_derive_title_strips_site_name_prefix():
+    """Tavily가 "Techmeme: 실제 헤드라인"처럼 사이트명을 붙여 주는 경우도 있다 —
+    출처는 source_name에 이미 있으니 제목에서는 뺀다."""
+    item = {"title": "Techmeme: Palona raised $20M", "content": "본문"}
+
+    assert search_engine.derive_title(item, "techmeme.com") == "Palona raised $20M"
+
+
+def test_pool_skips_duplicate_titles_from_different_urls(monkeypatch):
+    """Techmeme 리버 앵커는 URL이 달라도 같은 글을 가리킬 수 있다(실측 41건 중
+    6건 중복). 그대로 두면 라벨링에서 같은 내용을 두 번 판단하게 된다."""
+    monkeypatch.setattr(search_engine, "_fetch_site_results", lambda term, domain, start, end: [
+        {"url": "https://www.techmeme.com/260819/p3", "title": "Techmeme", "content": "같은 헤드라인"},
+        {"url": "https://www.techmeme.com/260819/p16", "title": "Techmeme", "content": "같은 헤드라인"},
+    ])
+    conn = _FakeConn()
+
+    result = search_engine.collect_pool_for_site(conn, 1, "techmeme.com", _START, _END)
+
+    assert result["inserted"] == 1
+    assert [p[2] for p in conn.inserted_params] == ["같은 헤드라인"]

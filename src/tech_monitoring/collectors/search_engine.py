@@ -1,4 +1,12 @@
-"""검색엔진(Tavily Search API) 수집기 — v2 파이프라인의 유일한 수집 경로.
+"""검색엔진(Tavily Search API) 수집기 — 파이프라인의 유일한 수집 경로.
+
+**2026-08-19부터 수집 단위가 "시장별 검색"에서 "공용 기사 풀"로 바뀌었다**
+(db/migrations/006_tavily_shared_pool.sql 헤더에 실측 근거). 넓은 질의
+(BROAD_QUERIES_KO/EN, 코드 상수)로 화이트리스트 사이트의 그 주 기사를 모아
+collected_articles에 시장과 무관하게 저장하고, 시장별 선별은 사람 라벨로
+학습한 분류기가 맡는다. 진입점은 collect_all -> collect_pool_for_site다.
+시장별 검색어 경로(collect_for_keyword -> search_results)는 정밀도 보강용
+선택지로 남겨두되 파이프라인에서는 호출하지 않는다.
 
 배경: 원래 Google Custom Search JSON API로 설계했으나 2026-08-13 실제 연동
 중 발견 — Google이 **2025년 중반 이후 생성된 신규 계정에는 이 API 접근을
@@ -56,14 +64,18 @@ end_date로 이 run의 period_start/end(db/weekly_run.get_run_period)를
 그대로 넘기면 실제 검색 자체가 그 달력 주로 정확히 맞춰져 배너와 항상
 일치한다.
 
-**Techmeme는 Tavily 색인 커버리지 자체가 얕다**(2026-08-13 실측 —
-time_range를 한 달로 넓혀도 0건). 저희 화이트리스트 필터 문제가 아니라
-Tavily가 이 사이트를 잘 못 가져오는 것으로 보인다 — 알려진 한계로 남겨둔다.
+**Techmeme**: 2026-08-13에는 색인 커버리지가 얕아 0건이었지만(time_range를
+한 달로 넓혀도 0건), 넓은 질의로 바꾼 뒤 12건이 잡혔다(2026-08-19 실측) —
+좁은 질의로 못 찾던 것이 원인이었던 것으로 보인다. 대신 이 사이트는 리버
+페이지 앵커(techmeme.com/260818/p3)가 잡혀서 페이지 제목이 "Techmeme"뿐인
+경우가 많다(42건 중 11건). 실제 헤드라인은 스니펫에 있어 derive_title이
+대신 채운다.
 
     ./.venv/Scripts/python.exe -m tech_monitoring.collectors.search_engine
 """
 
 import fnmatch
+import re
 from datetime import date
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit
@@ -129,6 +141,30 @@ SITE_DOMAINS = [
 KOREAN_DOMAINS = {"itworld.co.kr", "aitimes.com", "news.hada.io"}
 ENGLISH_DOMAINS = {"techcrunch.com", "askedtech.com", "techmeme.com"}
 
+# collected_articles.source_name에 남길 표시 이름(v3 수집기의 관례와 같은 모양).
+SITE_NAMES = {
+    "itworld.co.kr": "ITWorld",
+    "aitimes.com": "AI타임스",
+    "news.hada.io": "GeekNews",
+    "techcrunch.com": "TechCrunch",
+    "askedtech.com": "AskedTech",
+    "techmeme.com": "Techmeme",
+}
+
+# 공용 기사 풀을 만드는 넓은 질의(006 마이그레이션 헤더 참고). **사용자가
+# 입력하는 값이 아니라 코드 상수다** — 시장 이름만 받고 쓰는 도구를 만들려면
+# "동의어를 누가 지어내는가"라는 문제를 없애야 하고, 그 답이 이 방식이다.
+#
+# 이 두 개로 실측(2026-08-18, 이틀치)한 결과가 고유 58건·5개 사이트 고르게
+# 분포였다. 시장 이름을 검색어로 쓴 직전 실행이 시장당 3~5건이었으니 물량이
+# 10배 이상 차이 난다. Tavily는 결과가 부족하면 그 도메인 최신글로 채우므로
+# 넓은 질의가 사실상 "사이트 최신글 훑기"로 동작한다.
+#
+# 늘리면 사이트당 20건(RESULTS_PER_SITE) 상한이 질의 수만큼 늘어나고 크레딧도
+# 비례해 늘어난다(질의 1개당 사이트 6개 = 6크레딧/주).
+BROAD_QUERIES_KO = ["AI", "AI 기업"]
+BROAD_QUERIES_EN = ["AI", "AI startup"]
+
 
 def _url_path_for_matching(url: str) -> str:
     """fnmatch 패턴이 "www.itworld.co.kr/article/*"처럼 스킴 없는 host+path
@@ -164,6 +200,53 @@ def is_allowed_url(url: str) -> bool:
 
 def _extract_domain(url: str) -> str:
     return urlsplit(url).netloc
+
+
+# 제목 대신 사이트 이름만 들어오는 경우를 위한 스니펫 앞머리 정리(아래 참고).
+# "Michael Veale / @michae.lv:", "@nymag.com:" 같은 출처 표기를 떼어낸다 —
+# 콜론 앞이 짧고 "@"나 " / "를 포함할 때만 지운다(본문에 있는 콜론은 남긴다).
+_ATTRIBUTION_RE = re.compile(r"^([^:]{0,80}):\s+")
+DERIVED_TITLE_MAX = 110
+
+
+def derive_title(item: dict, domain: str) -> str:
+    """저장할 제목. Tavily가 제목을 못 주면 스니펫 앞머리로 대신한다.
+
+    Techmeme에서 실측된 문제(2026-08-19): 수집된 42건 중 11건이 제목이
+    "Techmeme"뿐이었다. techmeme.com/260818/p3 같은 URL은 리버 페이지의
+    앵커라서 페이지 제목이 사이트 이름이고, 실제 헤드라인은 본문(스니펫)에
+    들어 있다. 그대로 저장하면 라벨링 카드에 "Techmeme"만 떠서 사람이
+    판단할 수가 없다 — 학습 데이터도 그만큼 버려진다.
+
+    제목을 버리지 않고 **비어 있을 때만** 대체한다. 스니펫까지 없으면
+    "(제목 없음)"으로 남긴다(조용히 행을 버리지 않는다 — 어떤 후보도 사라지면
+    안 된다는 기존 원칙)."""
+    site = SITE_NAMES.get(domain, domain)
+    title = (item.get("title") or "").strip()
+
+    # "Techmeme: Palona, which uses AI agents..."처럼 사이트 이름이 제목 앞에
+    # 붙어 오는 경우가 있다 — 출처는 source_name에 이미 있으니 중복이다.
+    for prefix in (f"{site}: ", f"{domain}: "):
+        if title.lower().startswith(prefix.lower()):
+            title = title[len(prefix):].strip()
+            break
+
+    if title.lower() not in {"", "(제목 없음)", site.lower(), domain.lower()}:
+        return title
+
+    snippet = " ".join((item.get("content") or "").split())
+    if not snippet:
+        return "(제목 없음)"
+
+    match = _ATTRIBUTION_RE.match(snippet)
+    if match and ("@" in match.group(1) or " / " in match.group(1)):
+        snippet = snippet[match.end():]
+
+    if len(snippet) <= DERIVED_TITLE_MAX:
+        return snippet
+    cut = snippet[:DERIVED_TITLE_MAX]
+    head, _, tail = cut.rpartition(" ")
+    return f"{head or cut}…"
 
 
 def _parse_published_date(value: str | None):
@@ -249,6 +332,84 @@ def _insert_result(conn, *, run_id: int, fixed_keyword_id: int, query: str, rank
         return cur.fetchone() is not None
 
 
+def broad_queries_for_domain(domain: str) -> list[str]:
+    """이 사이트에 던질 넓은 질의 목록 — 사이트 언어에 맞춰 고른다.
+    영어 사이트에 한국어 질의를 던지면 Tavily가 못 맞히고 그 도메인의 무관한
+    인기글로 채운다(003·006 헤더의 실측 기록)."""
+    return BROAD_QUERIES_KO if domain in KOREAN_DOMAINS else BROAD_QUERIES_EN
+
+
+def _insert_pool_article(conn, *, run_id: int, domain: str, query: str, item: dict) -> bool:
+    """공용 기사 풀에 저장. 시장(fixed_keyword_id)을 넣지 않는 게 핵심 —
+    "이 기사가 어느 시장에 관련 있나"는 article_keyword_relevance가 따로
+    받는다(006 헤더 참고). 컬럼 구성은 v3 수집기(rss_collector._insert_article)
+    와 같게 맞춰서, 판단·라벨링·화면이 수집 방식을 구분하지 않게 한다.
+
+    **URL 중복 외에 제목 중복도 막는다.** Techmeme은 리버 페이지 앵커가
+    잡히는데 /260819/p3 과 /260819/p16 이 같은 글을 가리키는 경우가 있다
+    (실측 2026-08-19: 41건 중 고유 제목 35건 = 6건이 중복). URL이 다르니
+    ON CONFLICT (run_id, url)로는 안 걸러지고, 라벨링 화면에서 같은 내용을
+    두 번 판단하게 된다. 정보를 버리는 게 아니라 같은 글을 한 번만 남기는
+    것이라 URL 정규화와 같은 성격의 중복 제거다."""
+    url = item.get("url")
+    if not url:
+        return False
+    title = derive_title(item, domain)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO collected_articles
+                (run_id, source_name, fetch_method, title, url, source_domain, snippet, published_at)
+            SELECT %s, %s, 'search', %s, %s, %s, %s, %s
+            WHERE NOT EXISTS (
+                SELECT 1 FROM collected_articles WHERE run_id = %s AND title = %s
+            )
+            ON CONFLICT (run_id, url) DO NOTHING
+            RETURNING id
+            """,
+            (
+                run_id,
+                SITE_NAMES.get(domain, domain),
+                title,
+                normalize_url(url),
+                _extract_domain(url),
+                item.get("content"),
+                _parse_published_date(item.get("published_date")),
+                run_id,
+                title,
+            ),
+        )
+        return cur.fetchone() is not None
+
+
+def collect_pool_for_site(
+    conn, run_id: int, domain: str, start_date: date, end_date: date,
+) -> dict:
+    """사이트 하나에 넓은 질의를 각각 던져 공용 풀에 쌓는다.
+
+    한 사이트가 죽어도 다른 사이트는 계속 진행한다 — 실패는 error에 담아
+    정상 리턴하고, 파이프라인이 pipeline_report.stage_errors로 실패를 드러낸다
+    (예외를 던지면 그 주 수집이 통째로 날아간다)."""
+    name = SITE_NAMES.get(domain, domain)
+    fetched = inserted = 0
+
+    for query in broad_queries_for_domain(domain):
+        try:
+            items = _fetch_site_results(query, domain, start_date, end_date)
+        except httpx.HTTPError as exc:
+            return {"source": name, "fetched": fetched, "inserted": inserted, "error": str(exc)}
+
+        for item in items:
+            fetched += 1
+            url = item.get("url")
+            if not url or not is_allowed_url(url):
+                continue  # Tavily가 도메인은 맞혀도 경로까지는 우리가 다시 검증
+            if _insert_pool_article(conn, run_id=run_id, domain=domain, query=query, item=item):
+                inserted += 1
+
+    return {"source": name, "fetched": fetched, "inserted": inserted, "error": None}
+
+
 def _terms_for_domain(fixed_keyword: dict, domain: str) -> list[str]:
     """도메인의 언어에 맞는 검색어 목록. 둘 다 비어있으면(아직 등록 안 함)
     keyword 자체로 폴백해 기존 동작을 유지한다."""
@@ -263,8 +424,13 @@ def collect_for_keyword(
     conn, run_id: int, fixed_keyword: dict, start_date: date, end_date: date,
 ) -> dict:
     """고정 키워드 하나에 대해 (화이트리스트 사이트 × 그 언어의 검색어) 조합마다
-    개별 호출 후 저장. start_date/end_date는 이 run의 달력 주
-    (db/weekly_run.get_run_period)다."""
+    개별 호출 후 search_results에 저장. start_date/end_date는 이 run의 달력 주
+    (db/weekly_run.get_run_period)다.
+
+    **파이프라인은 이 경로를 쓰지 않는다**(2026-08-19부터 collect_pool). 시장별
+    검색어로 정밀도를 보강하고 싶을 때를 위한 선택적 경로로 남겨둔다 — 실측상
+    이 방식만으로는 시장당 3~5건이라 라벨링·학습 물량이 안 나온다(006 헤더).
+    """
     keyword = fixed_keyword["keyword"]
     fetched = inserted = 0
 
@@ -290,16 +456,25 @@ def collect_for_keyword(
 
 
 def collect_all(run_id: int) -> list[dict]:
+    """이번 주 공용 기사 풀을 만든다 — 화이트리스트 사이트마다 넓은 질의로
+    수집(006 헤더 참고).
+
+    고정 키워드를 보지 않는다: 수집은 시장과 무관하고, 시장별 선별은 나중에
+    분류기가 한다. 그래서 시장을 추가해도 재수집이 필요 없고 크레딧이 시장
+    수와 무관하다. 다만 활성 키워드가 하나도 없으면 수집해도 볼 화면이 없어
+    그대로 알린다(라벨링·판단이 전부 시장 단위라서)."""
     if not settings.tavily_api_key:
-        return [{"fixed_keyword": None, "fetched": 0, "inserted": 0, "error": "TAVILY_API_KEY 미설정 — .env 확인"}]
+        return [{"source": None, "fetched": 0, "inserted": 0, "error": "TAVILY_API_KEY 미설정 — .env 확인"}]
 
     conn = get_connection()
     try:
-        keywords = get_active_fixed_keywords(conn)
-        if not keywords:
-            return [{"fixed_keyword": None, "fetched": 0, "inserted": 0, "error": "fixed_keywords에 활성 키워드 없음"}]
+        if not get_active_fixed_keywords(conn):
+            return [{"source": None, "fetched": 0, "inserted": 0, "error": "fixed_keywords에 활성 키워드 없음"}]
         start_date, end_date = get_run_period(conn, run_id)
-        return [collect_for_keyword(conn, run_id, kw, start_date, end_date) for kw in keywords]
+        return [
+            collect_pool_for_site(conn, run_id, domain, start_date, end_date)
+            for domain in SITE_DOMAINS
+        ]
     finally:
         conn.close()
 
@@ -316,7 +491,7 @@ if __name__ == "__main__":
     _conn = get_connection()
     _errors = [r for r in _results if r["error"]]
     if _errors:
-        fail_weekly_run(_conn, _run_id, "; ".join(f"{r['fixed_keyword']}: {r['error']}" for r in _errors))
+        fail_weekly_run(_conn, _run_id, "; ".join(f"{r['source']}: {r['error']}" for r in _errors))
     else:
         complete_weekly_run(_conn, _run_id)
     _conn.close()

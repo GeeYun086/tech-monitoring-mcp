@@ -86,6 +86,23 @@ def fetch_search_results(conn, run_id: int, fixed_keyword_id: int) -> list[dict]
         return [dict(zip(columns, row)) for row in cur.fetchall()]
 
 
+def fetch_pool_rows(conn, run_id: int, fixed_keyword_id: int | None = None) -> list[dict]:
+    """공용 기사 풀(collected_articles) 전체 — 006부터 여기가 수집 결과다.
+
+    fixed_keyword_id를 받되 쓰지 않는다: keyword_merge.run_for_all_keywords가
+    fetch_rows(conn, run_id, kw_id) 모양으로 부르기 때문에 시그니처만 맞춘다.
+    풀은 시장과 무관하므로 지금은 시장마다 같은 기사에서 키워드를 뽑는다 —
+    분류기 점수가 붙은 뒤에는 "그 시장 상위 기사만"으로 좁히는 게 맞다
+    (그때 이 함수에 필터를 넣는다)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT title, snippet, source_domain FROM collected_articles WHERE run_id = %s",
+            (run_id,),
+        )
+        columns = [c.name for c in cur.description]
+        return [dict(zip(columns, row)) for row in cur.fetchall()]
+
+
 def build_term_sets(rows: list[dict]) -> list[set[str]]:
     """문서(기사) 하나당 term 집합 하나(순서 보존) — extract_candidates와 같은
     한글/영문 라우팅 기준(_is_korean_heavy)을 쓴다: 한글 우세 문서는 유니그램

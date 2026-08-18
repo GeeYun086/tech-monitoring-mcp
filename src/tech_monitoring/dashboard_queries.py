@@ -119,6 +119,56 @@ def get_search_results(conn, run_id: int, fixed_keyword_id: int, limit: int | No
         return _apply_summary_truncation([dict(zip(columns, row)) for row in cur.fetchall()])
 
 
+def get_pool_articles(conn, run_id: int, limit: int | None = None) -> list[dict]:
+    """이번 주 공용 기사 풀(006부터 화면이 보여줄 목록).
+
+    시장 인자를 받지 않는다 — 풀은 시장과 무관하고, 시장 탭들은 같은 목록을
+    각자의 기준으로 **정렬만** 달리해서 보여주는 구조로 간다. 아직 분류기
+    점수가 없으므로 지금은 세 탭이 동일한 최신순 목록이다(작업 3에서 정렬이
+    붙는다). 잘라내지 않는 건 기존 원칙 그대로 — 분류기가 틀려도 기사가
+    사라지지 않아야 하고, 라벨링에는 무관 기사도 필요하다."""
+    query = (
+        "SELECT title, url, snippet, source_domain, published_at, source_name "
+        "FROM collected_articles WHERE run_id = %s "
+        "ORDER BY published_at DESC NULLS LAST"
+    )
+    params: list = [run_id]
+    if limit is not None:
+        query += " LIMIT %s"
+        params.append(limit)
+    with conn.cursor() as cur:
+        cur.execute(query, params)
+        columns = [c.name for c in cur.description]
+        return _apply_summary_truncation([dict(zip(columns, row)) for row in cur.fetchall()])
+
+
+def get_pool_articles_for_variants(
+    conn, run_id: int, variant_phrases: list[str], limit: int | None = None,
+) -> list[dict]:
+    """공용 풀에서 특정 키워드(동의어 그룹) 언급 기사만 — 문자열 포함 검사다.
+
+    이건 **관련도 판단이 아니라 보조 필터**다. "에이전트 도입"처럼 기사에
+    그대로 안 쓰이는 표현으로는 거의 걸리지 않으므로, 시장별 선별은 분류기가
+    맡고 이 필터는 사용자가 특정 키워드를 눌러 좁혀볼 때만 쓴다."""
+    if not variant_phrases:
+        return []
+    patterns = [f"%{v}%" for v in variant_phrases]
+    query = (
+        "SELECT title, url, snippet, source_domain, published_at, source_name "
+        "FROM collected_articles WHERE run_id = %s "
+        "AND (title ILIKE ANY(%s) OR snippet ILIKE ANY(%s)) "
+        "ORDER BY published_at DESC NULLS LAST"
+    )
+    params: list = [run_id, patterns, patterns]
+    if limit is not None:
+        query += " LIMIT %s"
+        params.append(limit)
+    with conn.cursor() as cur:
+        cur.execute(query, params)
+        columns = [c.name for c in cur.description]
+        return _apply_summary_truncation([dict(zip(columns, row)) for row in cur.fetchall()])
+
+
 def get_search_results_for_variants(
     conn, run_id: int, fixed_keyword_id: int, variant_phrases: list[str], limit: int | None = None,
 ) -> list[dict]:
