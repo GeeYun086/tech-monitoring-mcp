@@ -12,8 +12,8 @@
        저장 후 다음 기사로 넘어간다 — 262건을 훑어야 해서 목록을 통째로
        그리면 클릭마다 전체 재렌더가 걸리고 어디까지 했는지도 놓친다.
        라벨을 저장하면 그 기사는 후보에서 빠지므로 rerun만으로 자연히
-       다음 기사가 나온다. 카드 아래 접힌 "최근 라벨" 목록에서 오클릭을
-       고칠 수 있다(반대로 바꾸기 / 라벨 취소 — 취소하면 후보로 돌아온다).
+       다음 기사가 나온다. 카드 아래 접힌 "라벨 검토 및 수정"에서 판단을
+       변경하거나 라벨을 취소할 수 있다(취소하면 후보 목록으로 복귀).
     3. 📈 성능 탭 — 라벨을 정답지로 삼아 분류기를 채점한다(relevance_model).
        라벨 수가 적을 때는 클래스 분포만 보여주고, 최소 기준을 넘으면 버튼을
        눌러 측정한다 — 클릭마다 자동 학습하면 임베딩 모델 로드(수십 초)가
@@ -235,8 +235,11 @@ def _render_label_review(conn, fixed_keyword: dict) -> None:
     if not recent:
         return
 
-    with st.expander(f"✅ 최근 라벨 {len(recent)}건 — 잘못 눌렀으면 여기서 고치세요", expanded=False):
-        st.caption("마지막에 누른 것부터 보여줍니다. 라벨 취소를 누르면 그 기사가 다시 후보로 돌아옵니다.")
+    with st.expander(f"✅ 라벨 검토 및 수정 (최근 {len(recent)}건)", expanded=False):
+        st.caption(
+            "최근에 판단한 순서로 표시됩니다. 판단을 변경하거나, 라벨을 취소해 "
+            "해당 기사를 후보 목록으로 되돌릴 수 있습니다."
+        )
         for row in recent:
             published = row["published_at"].strftime("%Y-%m-%d") if row.get("published_at") else "날짜 미상"
             text, flip, cancel = st.columns([6, 2, 1.4])
@@ -250,7 +253,7 @@ def _render_label_review(conn, fixed_keyword: dict) -> None:
                 labeling.LABEL_IRRELEVANT if row["label"] == labeling.LABEL_RELEVANT
                 else labeling.LABEL_RELEVANT
             )
-            if flip.button(f"{_LABEL_BADGES[opposite]}으로 바꾸기", key=f"flip_{key}", use_container_width=True):
+            if flip.button(f"{_LABEL_BADGES[opposite]}으로 변경", key=f"flip_{key}", use_container_width=True):
                 labeling.update_label(conn, row["url_norm"], fixed_keyword["id"], opposite)
                 st.rerun()
             if cancel.button("라벨 취소", key=f"del_{key}", use_container_width=True):
