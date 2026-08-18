@@ -6,7 +6,10 @@ from scripts.manage_fixed_keywords import (
     list_keywords,
     remove_keyword,
     set_active,
+    set_search_terms,
 )
+
+_COLS = ("id", "keyword", "display_order", "active", "created_at", "search_terms_ko", "search_terms_en")
 
 
 class _FakeCursor:
@@ -24,11 +27,8 @@ class _FakeCursor:
     def execute(self, query, params=()):
         if query.startswith("SELECT"):
             rows = sorted(self._table, key=lambda r: (r["display_order"], r["id"]))
-            self.description = [type("Col", (), {"name": n})() for n in
-                                 ("id", "keyword", "display_order", "active", "created_at")]
-            self._result_rows = [
-                (r["id"], r["keyword"], r["display_order"], r["active"], r["created_at"]) for r in rows
-            ]
+            self.description = [type("Col", (), {"name": n})() for n in _COLS]
+            self._result_rows = [tuple(r.get(c) for c in _COLS) for r in rows]
         elif "INSERT INTO fixed_keywords" in query:
             keyword, display_order = params
             existing = next((r for r in self._table if r["keyword"] == keyword), None)
@@ -39,6 +39,7 @@ class _FakeCursor:
                 self._table.append({
                     "id": len(self._table) + 1, "keyword": keyword,
                     "display_order": display_order, "active": True, "created_at": None,
+                    "search_terms_ko": [], "search_terms_en": [],
                 })
         elif query.startswith("UPDATE fixed_keywords SET active"):
             active, keyword = params
@@ -46,6 +47,14 @@ class _FakeCursor:
             self._result_rows = []
             if row is not None:
                 row["active"] = active
+                self._result_rows = [(row["id"],)]
+        elif query.startswith("UPDATE fixed_keywords SET search_terms_ko"):
+            terms_ko, terms_en, keyword = params
+            row = next((r for r in self._table if r["keyword"] == keyword), None)
+            self._result_rows = []
+            if row is not None:
+                row["search_terms_ko"] = terms_ko
+                row["search_terms_en"] = terms_en
                 self._result_rows = [(row["id"],)]
         elif query.startswith("DELETE FROM fixed_keywords"):
             (keyword,) = params
@@ -116,3 +125,20 @@ def test_remove_keyword_deletes_row():
 def test_remove_keyword_returns_false_for_unknown_keyword():
     conn = _FakeConn()
     assert remove_keyword(conn, "없는 키워드") is False
+
+
+def test_set_search_terms_updates_both_languages():
+    conn = _FakeConn(table=[
+        {"id": 1, "keyword": "교육", "display_order": 0, "active": True, "created_at": None,
+         "search_terms_ko": [], "search_terms_en": []},
+    ])
+    assert set_search_terms(conn, "교육", ["AI 교육", "에듀테크"], ["AI education", "edtech"]) is True
+
+    row = list_keywords(conn)[0]
+    assert row["search_terms_ko"] == ["AI 교육", "에듀테크"]
+    assert row["search_terms_en"] == ["AI education", "edtech"]
+
+
+def test_set_search_terms_returns_false_for_unknown_keyword():
+    conn = _FakeConn()
+    assert set_search_terms(conn, "없는 키워드", ["a"], ["b"]) is False

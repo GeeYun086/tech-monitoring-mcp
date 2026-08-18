@@ -17,9 +17,10 @@ class _FakeCursor:
     UNIQUE(run_id, fixed_keyword_id, url) ON CONFLICT DO NOTHING을
     inserted_urls 집합으로 흉내낸다 — 이미 있으면 fetchone()이 None(=미삽입)."""
 
-    def __init__(self, inserted_urls: set[str]):
+    def __init__(self, inserted_urls: set[str], inserted_params: list[tuple]):
         self._inserted_urls = inserted_urls
-        self._last_url = None
+        self._inserted_params = inserted_params
+        self._last_params = None
 
     def __enter__(self):
         return self
@@ -29,21 +30,24 @@ class _FakeCursor:
 
     def execute(self, query, params=None):
         assert "INSERT INTO search_results" in query
-        self._last_url = params[5]  # (run_id, fixed_keyword_id, query, rank, title, url, ...)
+        self._last_params = params  # (run_id, fixed_keyword_id, query, rank, title, url, ...)
 
     def fetchone(self):
-        if self._last_url in self._inserted_urls:
+        url = self._last_params[5]
+        if url in self._inserted_urls:
             return None
-        self._inserted_urls.add(self._last_url)
+        self._inserted_urls.add(url)
+        self._inserted_params.append(self._last_params)
         return (1,)
 
 
 class _FakeConn:
     def __init__(self):
         self.inserted_urls: set[str] = set()
+        self.inserted_params: list[tuple] = []
 
     def cursor(self):
-        return _FakeCursor(self.inserted_urls)
+        return _FakeCursor(self.inserted_urls, self.inserted_params)
 
     def close(self):
         pass
@@ -103,6 +107,76 @@ def test_parse_published_date_parses_rfc2822():
 @pytest.mark.parametrize("value", [None, "", "이상한 형식"])
 def test_parse_published_date_falls_back_to_none(value):
     assert search_engine._parse_published_date(value) is None
+
+
+# ---- _terms_for_domain / 다중 검색어(2026-08-13, 실사용 피드백) ----
+
+def test_terms_for_domain_uses_korean_terms_for_korean_sites():
+    kw = {"keyword": "교육", "search_terms_ko": ["AI 교육", "에듀테크"], "search_terms_en": ["AI education"]}
+    assert search_engine._terms_for_domain(kw, "aitimes.com") == ["AI 교육", "에듀테크"]
+
+
+def test_terms_for_domain_uses_english_terms_for_english_sites():
+    kw = {"keyword": "교육", "search_terms_ko": ["AI 교육"], "search_terms_en": ["AI education", "edtech"]}
+    assert search_engine._terms_for_domain(kw, "techcrunch.com") == ["AI education", "edtech"]
+
+
+def test_terms_for_domain_falls_back_to_keyword_when_empty():
+    """아직 언어별 검색어를 등록 안 한 고정 키워드는 keyword 자체로 폴백한다."""
+    kw = {"keyword": "교육", "search_terms_ko": [], "search_terms_en": []}
+    assert search_engine._terms_for_domain(kw, "aitimes.com") == ["교육"]
+    assert search_engine._terms_for_domain(kw, "techcrunch.com") == ["교육"]
+
+
+def test_terms_for_domain_falls_back_when_keys_missing():
+    """search_terms_ko/en 키 자체가 없는 dict(구버전 호출부 호환)도 안전해야 한다."""
+    kw = {"keyword": "교육"}
+    assert search_engine._terms_for_domain(kw, "aitimes.com") == ["교육"]
+
+
+def test_collect_for_keyword_queries_once_per_term_per_site(monkeypatch):
+    """검색어가 여러 개면 그 사이트에 대해 검색어 개수만큼 각각 호출해야 한다."""
+    calls = []
+
+    def fake_fetch(term, domain, start_date, end_date):
+        calls.append((domain, term))
+        return []
+
+    monkeypatch.setattr(search_engine, "_fetch_site_results", fake_fetch)
+
+    kw = {
+        "id": 1, "keyword": "교육",
+        "search_terms_ko": ["AI 교육", "에듀테크"],
+        "search_terms_en": ["AI education"],
+    }
+    search_engine.collect_for_keyword(_FakeConn(), run_id=1, fixed_keyword=kw, start_date=_START, end_date=_END)
+
+    for domain in search_engine.KOREAN_DOMAINS:
+        assert (domain, "AI 교육") in calls
+        assert (domain, "에듀테크") in calls
+    for domain in search_engine.ENGLISH_DOMAINS:
+        assert (domain, "AI education") in calls
+    assert len(calls) == len(search_engine.KOREAN_DOMAINS) * 2 + len(search_engine.ENGLISH_DOMAINS) * 1
+
+
+def test_collect_for_keyword_stores_actual_term_as_query(monkeypatch):
+    """search_results.query엔 카테고리 이름("교육")이 아니라 실제로 검색에
+    쓴 구체적인 검색어("에듀테크")가 남아야 한다 — 나중에 어느 검색어가
+    이 기사를 찾아왔는지 추적할 수 있게."""
+    monkeypatch.setattr(
+        search_engine, "_fetch_site_results",
+        lambda term, domain, start_date, end_date: (
+            [_item("https://www.aitimes.com/news/x.html")] if domain == "aitimes.com" else []
+        ),
+    )
+
+    conn = _FakeConn()
+    kw = {"id": 1, "keyword": "교육", "search_terms_ko": ["에듀테크"], "search_terms_en": []}
+    search_engine.collect_for_keyword(conn, run_id=1, fixed_keyword=kw, start_date=_START, end_date=_END)
+
+    assert len(conn.inserted_params) == 1
+    stored_query = conn.inserted_params[0][2]  # (run_id, fixed_keyword_id, query, ...)
+    assert stored_query == "에듀테크"
 
 
 # ---- collect_for_keyword ----

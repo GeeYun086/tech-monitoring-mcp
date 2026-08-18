@@ -10,9 +10,14 @@ from datetime import date, timedelta
 
 
 def get_active_fixed_keywords(conn) -> list[dict]:
+    """search_terms_ko/en(2026-08-13 추가)도 함께 반환한다 — 실제 검색은
+    keyword 문자열 그대로가 아니라 이 언어별 동의어 목록으로 한다
+    (collectors/search_engine.py, db/migrations/003_multi_term_keywords.sql
+    헤더 주석 참고). 비어있으면 collect 쪽에서 keyword로 폴백한다."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, keyword FROM fixed_keywords WHERE active ORDER BY display_order, id"
+            "SELECT id, keyword, search_terms_ko, search_terms_en FROM fixed_keywords "
+            "WHERE active ORDER BY display_order, id"
         )
         columns = [c.name for c in cur.description]
         return [dict(zip(columns, row)) for row in cur.fetchall()]
