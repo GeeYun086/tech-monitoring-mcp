@@ -60,6 +60,15 @@ def _render_run_banner(run: dict | None) -> None:
     label = _STATUS_LABELS.get(run["status"], run["status"])
     st.caption(f"기준 기간: {run['period_start']} ~ {run['period_end']} · 상태: {label}")
 
+    # 실패를 화면에서 바로 알 수 있게(2026-08-18) — 그 전까지는 파이프라인이
+    # 조용히 실패해도 "결과가 좀 적네"로만 보였다. 아래 기사 목록이 비어
+    # 보이는 게 수집 실패 때문인지 진짜 기사가 없어서인지 구분되게 한다.
+    if run["status"] == "failed":
+        st.error(
+            f"이번 주 파이프라인에서 실패한 단계가 있습니다: **{run.get('error_message') or '(사유 미기록)'}**  \n"
+            "아래 결과가 불완전할 수 있습니다. 실패 사유는 파이프라인 실행 로그를 확인하세요."
+        )
+
 
 def _render_search_box() -> None:
     st.subheader("🔍 직접 검색")
