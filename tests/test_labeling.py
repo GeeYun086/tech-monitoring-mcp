@@ -455,3 +455,41 @@ def test_delete_label_scoped_to_me():
     conn = _FakeConn(article_labels=[_label_row("u1", labeled_by="동료")])
 
     assert labeling.delete_label(conn, "u1", 1) is False
+
+
+def test_candidates_can_be_scoped_to_one_publication_week():
+    """소급 수집분이 한 run에 여러 주 섞여 있다 — 후보가 최신순이라 필터가
+    없으면 라벨이 최신 주에만 몰려 주차 단위 교차검증이 성립하지 않는다."""
+    conn = _FakeConn(collected_articles=[
+        _article("https://a.com/this-week", published_at=datetime(2026, 8, 18)),
+        _article("https://a.com/last-week", published_at=datetime(2026, 8, 11)),
+    ])
+
+    result = labeling.fetch_unlabeled_candidates(
+        conn, run_id=1, fixed_keyword_id=1, week_start=date(2026, 8, 10),
+    )
+
+    assert [r["url"] for r in result] == ["https://a.com/last-week"]
+
+
+def test_candidates_can_be_scoped_to_undated_articles():
+    conn = _FakeConn(collected_articles=[
+        _article("https://a.com/dated", published_at=datetime(2026, 8, 18)),
+        _article("https://a.com/undated"),
+    ])
+
+    result = labeling.fetch_unlabeled_candidates(
+        conn, run_id=1, fixed_keyword_id=1, week_start=labeling.UNDATED,
+    )
+
+    assert [r["url"] for r in result] == ["https://a.com/undated"]
+
+
+def test_candidates_without_week_filter_include_every_week():
+    conn = _FakeConn(collected_articles=[
+        _article("https://a.com/1", published_at=datetime(2026, 8, 18)),
+        _article("https://a.com/2", published_at=datetime(2026, 8, 11)),
+        _article("https://a.com/3"),
+    ])
+
+    assert len(labeling.fetch_unlabeled_candidates(conn, run_id=1, fixed_keyword_id=1)) == 3

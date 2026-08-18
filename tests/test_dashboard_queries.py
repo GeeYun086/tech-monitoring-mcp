@@ -2,7 +2,7 @@
 흉내낸 스텁 conn/cursor를 쓴다 — 어떤 SQL이 실행됐는지가 아니라 반환값이
 기대한 필터링·정렬을 반영하는지에 집중한다."""
 
-from datetime import datetime
+from datetime import date, datetime
 
 from tech_monitoring import dashboard_queries as dq
 
@@ -53,6 +53,24 @@ class _FakeCursor:
             ]
             rows.sort(key=lambda r: (-r["doc_count"], -(r["tfidf_score"] or -1)))
             rows = rows[:limit]
+        elif "date_trunc('week'" in query:          # get_pool_weeks(발행 주 목록)
+            (run_id,) = params
+            counts: dict = {}
+            for r in self._tables.get("collected_articles", []):
+                if r["run_id"] != run_id or r.get("published_at") is None:
+                    continue
+                day = r["published_at"].date()
+                monday = day.fromordinal(day.toordinal() - day.weekday())
+                counts[monday] = counts.get(monday, 0) + 1
+            self.description = [type("Col", (), {"name": n})() for n in ("week_start", "total")]
+            self._rows = sorted(counts.items(), reverse=True)
+            return
+        elif "published_at IS NULL" in query and "count(*)" in query:
+            (run_id,) = params
+            undated = [r for r in self._tables.get("collected_articles", [])
+                       if r["run_id"] == run_id and r.get("published_at") is None]
+            self._rows = [(len(undated),)]
+            return
         elif table == "collected_articles":
             # 시장별 정렬 질의는 (fixed_keyword_id, run_id) 순으로 넘어온다.
             scoped = "LEFT JOIN article_keyword_relevance" in query
@@ -68,6 +86,12 @@ class _FakeCursor:
                     r for r in rows
                     if any(n in r["title"] or n in (r.get("snippet") or "") for n in needles)
                 ]
+            if "published_at >=" in query:
+                start, end, *rest = rest
+                rows = [r for r in rows
+                        if r.get("published_at") is not None and start <= r["published_at"].date() < end]
+            elif "published_at IS NULL" in query:
+                rows = [r for r in rows if r.get("published_at") is None]
             # 점수는 (기사, 시장) 쌍에만 붙는다 — 없으면 NULL로 딸려온다.
             scores = {
                 (s["url"], s["fixed_keyword_id"]): s["score"]
@@ -386,3 +410,54 @@ def test_get_pool_articles_ignores_other_markets_scores():
 
     assert [r["title"] for r in result] == ["나", "가"]        # 점수 없음 → 최신순
     assert all(r["score"] is None for r in result)
+
+
+# --- 주차 선택(소급 수집으로 한 run에 여러 주가 섞인다) --------------------
+
+def test_get_pool_weeks_lists_recent_weeks_first_with_counts():
+    conn = _FakeConn(collected_articles=[
+        _pool_row("https://a.com/1", published_at=datetime(2026, 8, 17)),
+        _pool_row("https://a.com/2", published_at=datetime(2026, 8, 18)),
+        _pool_row("https://a.com/3", published_at=datetime(2026, 8, 11)),
+    ])
+
+    weeks = dq.get_pool_weeks(conn, run_id=1)
+
+    assert weeks == [
+        {"week_start": date(2026, 8, 17), "total": 2},
+        {"week_start": date(2026, 8, 10), "total": 1},
+    ]
+
+
+def test_get_pool_weeks_surfaces_undated_articles_as_their_own_bucket():
+    """발행일 없는 기사는 어느 주에도 안 속한다 — 버킷으로 내주지 않으면
+    주차를 고르는 순간 화면에서 통째로 사라지고 라벨링 대상에서도 빠진다."""
+    conn = _FakeConn(collected_articles=[
+        _pool_row("https://a.com/1", published_at=datetime(2026, 8, 17)),
+        _pool_row("https://a.com/2"),
+    ])
+
+    assert dq.get_pool_weeks(conn, run_id=1)[-1] == {"week_start": None, "total": 1}
+
+
+def test_get_pool_articles_can_be_scoped_to_one_week():
+    conn = _FakeConn(collected_articles=[
+        _pool_row("https://a.com/this-week", title="이번 주", published_at=datetime(2026, 8, 18)),
+        _pool_row("https://a.com/last-week", title="지난 주", published_at=datetime(2026, 8, 11)),
+    ])
+
+    result = dq.get_pool_articles(conn, run_id=1, fixed_keyword_id=1, week_start=date(2026, 8, 10))
+
+    assert [r["title"] for r in result] == ["지난 주"]
+
+
+def test_get_pool_articles_can_show_only_undated():
+    conn = _FakeConn(collected_articles=[
+        _pool_row("https://a.com/dated", title="날짜 있음", published_at=datetime(2026, 8, 18)),
+        _pool_row("https://a.com/undated", title="날짜 없음"),
+    ])
+
+    from tech_monitoring import labeling
+    result = dq.get_pool_articles(conn, run_id=1, fixed_keyword_id=1, week_start=labeling.UNDATED)
+
+    assert [r["title"] for r in result] == ["날짜 없음"]
