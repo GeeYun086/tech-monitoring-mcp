@@ -1,7 +1,6 @@
-"""v3: LLM 기반 "이 기사가 이 고정 키워드(모니터링 대상 시장)와 관련
-있는가" 판단 — v3 파이프라인에서만 필요한 단계다(v2는 화이트리스트
-자체가 관련도를 보장한다는 전제라 이 단계가 아예 없다. README "v2 vs v3
-비교 실험" 참고).
+"""v3: "이 기사가 이 고정 키워드(모니터링 대상 시장)와 관련 있는가" 판단 —
+v3 파이프라인에서만 필요한 단계다(v2는 화이트리스트 자체가 관련도를
+보장한다는 전제라 이 단계가 아예 없다. README "v2 vs v3 비교 실험" 참고).
 
 analysis/keyword_merge.py와 같은 원칙: LLM은 판단만 하고 그 결과를 그대로
 믿지 않는다 — 목록 범위 밖 번호(환각)는 버리고, 파싱 자체가 실패하면 전부
@@ -20,6 +19,13 @@ fetch_search_results()와 같은 모양(title/snippet/source_domain)의 행을
 fetch_rows로 그대로 꽂아 넣으면 TF-IDF 후보추출·Gemini 동의어 병합 로직은
 무변경으로 재사용된다.
 
+**판단 주체(2026-08-18 변경)**: 사람이 매긴 라벨로 학습한 로컬 분류기
+(relevance_model)가 있으면 그걸 쓰고, 없으면 기존 Gemini 경로로 폴백한다.
+분류기 쪽은 API 호출이 0이라 429·크레딧 상태와 무관하게 동작한다 — 이
+단계가 Gemini에 묶여 있던 게 "그 주 관련 기사 0건"의 원인이었다.
+어느 쪽으로 판단했는지는 결과의 "method"에 남는다(모델이 있는 줄 알았는데
+조용히 Gemini를 쓰고 있는 상황을 알아챌 수 있게).
+
     ./.venv/Scripts/python.exe -m tech_monitoring.analysis.relevance_filter
 """
 
@@ -27,6 +33,11 @@ import json
 
 from tech_monitoring.db.weekly_run import get_active_fixed_keywords
 from tech_monitoring.llm_client import call_gemini_json
+
+# 분류기가 "도움됨"으로 볼 확률 기준선. 0.5는 학습 때와 같은 기준이다
+# (relevance_model.evaluate도 0.5로 채점하므로 화면에서 본 Precision/Recall이
+# 실제 파이프라인 동작과 일치한다).
+RELEVANCE_THRESHOLD = 0.5
 
 _PROMPT_TEMPLATE = """다음은 이번 주 여러 사이트에서 수집한 기사 목록이다(번호, 제목, 요약/카테고리).
 
@@ -117,25 +128,54 @@ def _save_relevance(
     return inserted
 
 
-def judge_keyword(conn, run_id: int, fixed_keyword: dict, articles: list[dict]) -> dict:
-    if not articles:
-        return {"fixed_keyword": fixed_keyword["keyword"], "judged": 0, "relevant": 0, "error": None}
+def judge_with_classifier(bundle: dict, fixed_keyword: dict, articles: list[dict]) -> set[int]:
+    """학습된 로컬 분류기로 판단한다(Gemini 대체 경로).
 
-    prompt = build_prompt(fixed_keyword["keyword"], articles)
+    relevance_model.build_text가 읽을 수 있는 모양으로 맞춰서 넘긴다 —
+    학습 때와 **똑같은 입력 형식**이어야 한다(고정 키워드를 앞에 붙인
+    "키워드 [SEP] 제목 요약"). 여기서 형식이 어긋나면 정확도가 조용히
+    무너지므로 build_text를 직접 재사용한다.
+    """
+    from tech_monitoring.relevance_model import predict_proba
+
+    rows = [
+        {"fixed_keyword": fixed_keyword["keyword"], "title": a["title"], "snippet": a.get("snippet")}
+        for a in articles
+    ]
+    probabilities = predict_proba(bundle, rows)
+    return {i for i, p in enumerate(probabilities) if p >= RELEVANCE_THRESHOLD}
+
+
+def judge_keyword(conn, run_id: int, fixed_keyword: dict, articles: list[dict], bundle=None) -> dict:
+    """bundle(학습된 분류기)이 있으면 그걸로, 없으면 Gemini로 판단한다.
+
+    호출부(judge_all)가 모델을 한 번만 불러와 넘겨준다 — 키워드마다 다시
+    불러오면 임베딩 방식일 때 모델 로드가 키워드 수만큼 반복된다.
+    """
+    if not articles:
+        return {"fixed_keyword": fixed_keyword["keyword"], "judged": 0, "relevant": 0,
+                "method": None, "error": None}
+
+    method = f"classifier:{bundle['method']}" if bundle else "gemini"
     try:
-        raw_response = call_gemini(prompt)
+        if bundle is not None:
+            relevant_indices = judge_with_classifier(bundle, fixed_keyword, articles)
+        else:
+            relevant_indices = parse_relevant_indices(
+                call_gemini(build_prompt(fixed_keyword["keyword"], articles)), len(articles),
+            )
     except Exception as exc:  # google-genai가 다양한 예외 타입(ClientError 등)을 던짐
         return {
             "fixed_keyword": fixed_keyword["keyword"], "judged": 0, "relevant": 0,
-            "error": f"{type(exc).__name__}: {exc}",
+            "method": method, "error": f"{type(exc).__name__}: {exc}",
         }
 
-    relevant_indices = parse_relevant_indices(raw_response, len(articles))
     _save_relevance(conn, run_id, fixed_keyword["id"], articles, relevant_indices)
     return {
         "fixed_keyword": fixed_keyword["keyword"],
         "judged": len(articles),
         "relevant": len(relevant_indices),
+        "method": method,
         "error": None,
     }
 
@@ -143,9 +183,18 @@ def judge_keyword(conn, run_id: int, fixed_keyword: dict, articles: list[dict]) 
 def judge_all(conn, run_id: int) -> list[dict]:
     """이번 run에 수집된 기사 전체를 딱 한 번 가져와서, 활성 고정 키워드
     각각에 대해 배치 판단한다(기사 목록 자체는 고정 키워드마다 재사용 —
-    수집은 한 번, 판단만 키워드 수만큼)."""
+    수집은 한 번, 판단만 키워드 수만큼).
+
+    학습된 분류기가 있으면 그걸 쓰고, 없으면 Gemini로 폴백한다 — 라벨이
+    쌓이기 전에도 파이프라인이 돌아야 하기 때문이다. 어느 쪽을 썼는지는
+    결과의 "method"에 남아 파이프라인 로그에서 확인할 수 있다(모델이
+    있는 줄 알았는데 조용히 Gemini를 쓰고 있는 상황을 알아챌 수 있게).
+    """
+    from tech_monitoring.relevance_model import load_model
+
+    bundle = load_model()
     articles = fetch_collected_articles(conn, run_id)
-    return [judge_keyword(conn, run_id, kw, articles) for kw in get_active_fixed_keywords(conn)]
+    return [judge_keyword(conn, run_id, kw, articles, bundle) for kw in get_active_fixed_keywords(conn)]
 
 
 if __name__ == "__main__":
