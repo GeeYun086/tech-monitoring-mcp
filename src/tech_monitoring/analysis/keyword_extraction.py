@@ -17,6 +17,11 @@ dashboard_data.py가 실사용 검증까지 마친 것을 그대로 쓴다("AI"�
 기사는 원시 빈도(count_keywords)로, 그 외(주로 영문)는 구+TF-IDF
 (phrase_candidates + tfidf_rank)로 별도 채점한다.
 
+**영문 후보는 대문자 시작(고유명사 대리 신호)인 것만 남긴다**(2026-08-13
+추가). TF-IDF+불용어만으로는 "access"·"did"·"told"·"companies" 같은 일반
+동사·명사가 여전히 상위권에 섞여 나왔다(실사용 확인) — 담당자가 원한 건
+"기술 용어·기업명"만이라, `_is_entity_like_phrase()`로 한 번 더 좁힌다.
+
     ./.venv/Scripts/python.exe -m tech_monitoring.analysis.keyword_extraction
 """
 
@@ -25,6 +30,7 @@ import re
 from tech_monitoring.db.connection import get_connection
 from tech_monitoring.db.weekly_run import get_active_fixed_keywords
 from tech_monitoring.utils.keyword_text import count_keywords, phrase_candidates, tfidf_rank, tokens
+from tech_monitoring.utils.text import strip_article_boilerplate
 
 _HANGUL_RE = re.compile(r"[가-힣]")
 _ASCII_LETTER_RE = re.compile(r"[A-Za-z]")
@@ -36,7 +42,26 @@ CANDIDATES_PER_BUCKET = 30
 
 
 def _article_text(row: dict) -> str:
-    return f"{row.get('title') or ''} {row.get('snippet') or ''}"
+    snippet = strip_article_boilerplate(row.get("snippet") or "")
+    return f"{row.get('title') or ''} {snippet}"
+
+
+def _is_entity_like_phrase(phrase: str) -> bool:
+    """영문 후보가 "기술 용어·기업명"에 가까운 고유명사인지 판단하는 대리
+    신호 — 구를 이루는 단어 전부가 대문자로 시작해야 통과한다. 회사·제품명·
+    약어는 관례적으로 대문자로 쓰지만("OpenAI"·"AI"·"TechCrunch"),
+    "access"·"did"·"companies" 같은 일반 단어는 소문자로 시작한다. 2단어
+    이상 구는 전부 대문자로 시작해야 통과시킨다 — "told TechCrunch"처럼
+    일부만 고유명사인 구는 그 자체로 엔티티가 아니라서 걸러야 한다.
+
+    완벽한 개체명 인식(NER)은 아니고, "Agents"처럼 문장 맨 앞이라 우연히
+    대문자인 일반 단어를 걸러내지 못하는 한계가 있다. 그래도 불용어 목록과
+    함께 쓰면 실사용 중 확인된 노이즈(2026-08-13 — "access"·"did"·"told"·
+    "companies"·"customers"·"information"·"work" 등 일반 동사·명사가
+    "이번 주 주요 키워드" 상위권을 차지하던 문제)를 크게 줄인다. 한글
+    후보에는 적용하지 않는다(한글은 대소문자 구분이 없어 이 신호 자체가 없음)."""
+    words = [w for w in phrase.split(" ") if w]
+    return bool(words) and all(w[:1].isupper() for w in words)
 
 
 def _is_korean_heavy(text: str) -> bool:
@@ -96,7 +121,10 @@ def extract_candidates(rows: list[dict], top_n: int = CANDIDATES_PER_BUCKET) -> 
             "tfidf_score": None, "method": "frequency",
         })
 
-    term_sets = [phrase_candidates(text) for text in global_texts]
+    term_sets = [
+        {p for p in phrase_candidates(text) if _is_entity_like_phrase(p)}
+        for text in global_texts
+    ]
     for entry in tfidf_rank(term_sets, top_n):
         candidates.append({
             "phrase": entry["word"], "doc_count": entry["doc_freq"],

@@ -144,3 +144,42 @@ def test_get_search_results_for_variants_filters_by_title_or_snippet():
 def test_get_search_results_for_variants_returns_empty_for_no_variants():
     conn = _FakeConn(search_results=[])
     assert dq.get_search_results_for_variants(conn, run_id=1, fixed_keyword_id=10, variant_phrases=[]) == []
+
+
+# ---- truncate_summary: 2026-08-13 실사용 확인 — 화면에 문단째로 쏟아지던 문제 ----
+
+def test_truncate_summary_returns_short_text_unchanged():
+    assert dq.truncate_summary("짧은 요약") == "짧은 요약"
+
+
+def test_truncate_summary_handles_none_and_empty():
+    assert dq.truncate_summary(None) == ""
+    assert dq.truncate_summary("") == ""
+
+
+def test_truncate_summary_cuts_long_text_at_word_boundary():
+    text = "word " * 100  # 500자
+    result = dq.truncate_summary(text, max_chars=20)
+    assert len(result) <= 21  # 말줄임표(1자) 포함
+    assert result.endswith("…")
+    assert not result[:-1].endswith(" ")  # 단어 중간이 아니라 공백 기준으로 잘림
+
+
+def test_truncate_summary_collapses_whitespace_and_removes_chunk_markers():
+    """Tavily 응답의 "[...]" 청크 구분자와 개행·중복 공백을 정리해야 한다."""
+    text = "첫 문단입니다.\n\n[...] 둘째 문단입니다.   공백이  많음."
+    result = dq.truncate_summary(text, max_chars=200)
+    assert "[...]" not in result
+    assert "  " not in result
+    assert "\n" not in result
+
+
+def test_get_search_results_truncates_long_snippet():
+    conn = _FakeConn(search_results=[
+        {
+            "run_id": 1, "fixed_keyword_id": 10, "title": "A", "url": "u1",
+            "snippet": "word " * 100, "source_domain": "d", "published_at": None, "rank": 1,
+        },
+    ])
+    result = dq.get_search_results(conn, run_id=1, fixed_keyword_id=10)
+    assert len(result[0]["snippet"]) <= dq._SUMMARY_MAX_CHARS + 1

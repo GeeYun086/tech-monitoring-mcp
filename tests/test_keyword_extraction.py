@@ -73,6 +73,41 @@ def test_extract_candidates_routes_korean_text_to_frequency_bucket():
     assert any("삼성전자" in c["phrase"] for c in korean_candidates)
 
 
+def test_is_entity_like_phrase_accepts_capitalized_terms():
+    assert ke._is_entity_like_phrase("OpenAI") is True
+    assert ke._is_entity_like_phrase("AI") is True
+    assert ke._is_entity_like_phrase("General Catalyst") is True  # 2단어 다 대문자
+
+
+def test_is_entity_like_phrase_rejects_lowercase_word():
+    assert ke._is_entity_like_phrase("access") is False
+    assert ke._is_entity_like_phrase("did") is False
+
+
+def test_is_entity_like_phrase_rejects_phrase_with_any_lowercase_word():
+    """"told TechCrunch"처럼 일부만 고유명사인 구는 그 자체로 엔티티가 아니다."""
+    assert ke._is_entity_like_phrase("told TechCrunch") is False
+
+
+def test_is_entity_like_phrase_rejects_empty_string():
+    assert ke._is_entity_like_phrase("") is False
+
+
+def test_extract_candidates_filters_out_generic_lowercase_words_from_english_bucket():
+    """2026-08-13 실사용 확인 — "access"·"did"·"customers" 같은 일반 단어가
+    "이번 주 주요 키워드" 상위권을 차지하던 문제의 회귀 테스트. 기술
+    용어·기업명(대문자 시작)만 남아야 한다."""
+    rows = [
+        {"title": "OpenAI said employees did not tell customers about access issues", "snippet": ""},
+        {"title": "OpenAI expands access for enterprise customers who never tell anyone", "snippet": ""},
+    ]
+    candidates = ke.extract_candidates(rows)
+    phrases = {c["phrase"] for c in candidates}
+    assert "OpenAI" in phrases
+    for generic in ("access", "did", "customers", "tell", "employees", "issues"):
+        assert generic not in phrases
+
+
 def test_extract_candidates_routes_english_text_to_tfidf_bucket():
     rows = [
         {"title": "OpenAI released a new model", "snippet": "The new model improves reasoning"},

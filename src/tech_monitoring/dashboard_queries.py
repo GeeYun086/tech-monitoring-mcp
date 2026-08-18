@@ -4,7 +4,48 @@
 현재는 삭제됨): **계산은 여기서 끝내고, UI는 그대로 보여주기만 한다.** 랭킹·
 필터링 로직을 화면 코드에 흩어두면 재사용도 안 되고 검증도 어렵다 — 이 모듈은
 Streamlit에 의존하지 않아 DB 없이도(fake conn으로) 그대로 테스트 가능하다.
+
+utils.text.strip_article_boilerplate: 화면 요약도 analysis/keyword_extraction.py
+와 같은 정리를 거친다 — 안 그러면 ITWorld류 사이트의 고정 태그 목록이 그대로
+잘려서 요약으로 나가버린다(2026-08-13 실사용 확인).
+
+**요약 길이(2026-08-13 추가)**: search_results.snippet엔 Tavily의 content
+(여러 문단짜리 발췌)가 그대로 들어있다 — 실사용 확인 결과 화면에 문단째로
+쏟아져 나와 장황했다. get_search_results(_for_variants)가 반환 직전에
+truncate_summary()로 짧게 잘라 UI가 항상 짧은 요약만 받게 한다(UI 쪽에서
+매번 자르는 코드를 반복하지 않도록).
+
+**번역은 안 한다** — 영문 기사의 title/snippet은 원문 그대로 나간다. 한글
+번역은 LLM(또는 별도 번역 API)이 필요한데, 지금은 Gemini 크레딧이 막혀있어
+붙이지 않았다(analysis/keyword_merge.py의 프리페이드 크레딧 이슈 참고).
+크레딧 복구 후 붙일지, 별도 번역 서비스를 쓸지는 아직 미정 — 담당자 확인 필요.
 """
+
+from tech_monitoring.utils.text import strip_article_boilerplate
+
+_SUMMARY_MAX_CHARS = 150
+
+
+def truncate_summary(text: str | None, max_chars: int = _SUMMARY_MAX_CHARS) -> str:
+    """긴 발췌문을 화면용 짧은 요약으로 자른다. 개행·중복 공백을 하나로
+    정리하고, 단어 중간에서 뚝 끊기지 않게 마지막 공백 기준으로 자른 뒤
+    말줄임표를 붙인다. Tavily 응답에 섞여 나오는 "[...]" 청크 구분자도
+    제거한다(실제 응답에서 확인 — 문단과 문단 사이를 이 표시로 잇는다)."""
+    if not text:
+        return ""
+    text = strip_article_boilerplate(text)
+    cleaned = " ".join(text.replace("[...]", " ").split())
+    if not cleaned:
+        return ""
+    if len(cleaned) <= max_chars:
+        return cleaned
+    return cleaned[:max_chars].rsplit(" ", 1)[0] + "…"
+
+
+def _apply_summary_truncation(rows: list[dict]) -> list[dict]:
+    for row in rows:
+        row["snippet"] = truncate_summary(row.get("snippet"))
+    return rows
 
 
 def get_latest_run(conn) -> dict | None:
@@ -62,7 +103,7 @@ def get_search_results(conn, run_id: int, fixed_keyword_id: int, limit: int = 20
             (run_id, fixed_keyword_id, limit),
         )
         columns = [c.name for c in cur.description]
-        return [dict(zip(columns, row)) for row in cur.fetchall()]
+        return _apply_summary_truncation([dict(zip(columns, row)) for row in cur.fetchall()])
 
 
 def get_search_results_for_variants(
@@ -87,4 +128,4 @@ def get_search_results_for_variants(
             (run_id, fixed_keyword_id, patterns, patterns, limit),
         )
         columns = [c.name for c in cur.description]
-        return [dict(zip(columns, row)) for row in cur.fetchall()]
+        return _apply_summary_truncation([dict(zip(columns, row)) for row in cur.fetchall()])

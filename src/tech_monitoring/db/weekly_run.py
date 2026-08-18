@@ -19,12 +19,19 @@ def get_active_fixed_keywords(conn) -> list[dict]:
 
 
 def _current_week_bounds(today: date | None = None) -> tuple[date, date]:
-    """이번 주 월~일 범위. 검색엔진 쪽 dateRestrict=w1("지난 7일" 롤링 윈도우)과는
-    별개로, weekly_runs.period_start/end는 사람이 보기 좋은 달력 주 단위로 기록한다
-    (같은 주에 배치를 다시 돌려도 UNIQUE(period_start, period_end)로 같은 run에 묶임)."""
+    """실행일 기준 "지난 7일" 롤링 윈도우 — collectors/search_engine.py가
+    Tavily에 실제로 보내는 time_range="week"(호출 시점 기준 지난 7일)와
+    정확히 같은 범위여야 한다.
+
+    2026-08-13에 겪은 버그: 원래 이 함수가 "이번 주 월~일" 달력 주간을
+    돌려줬는데, Tavily의 time_range="week"는 달력 주가 아니라 "실행 시점
+    기준 지난 7일"이라 둘이 다른 기간을 가리켰다(실행일이 수요일이면
+    달력 주는 그 주 월~일 전체를 말하지만, 실제 검색은 그 전주 목요일부터
+    실행일까지만 훑음). 그 결과 대시보드 배너("기준 기간: 8/10~8/16")와
+    실제 수집된 기사 날짜(8/6~8/13)가 어긋나 보였다. 이제는 항상 실행일을
+    끝점으로 하는 지난 7일로 맞춰서 배너와 실제 검색 범위가 항상 일치한다."""
     today = today or date.today()
-    monday = today - timedelta(days=today.weekday())
-    return monday, monday + timedelta(days=6)
+    return today - timedelta(days=6), today
 
 
 def start_weekly_run(conn, today: date | None = None) -> int:
