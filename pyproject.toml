@@ -11,9 +11,21 @@ dependencies = [
     "httpx>=0.27",
     "google-genai>=1.0",
     "streamlit>=1.38",
+    # 관련도 분류기(relevance_model.py) — 사람이 매긴 라벨로 학습해 Gemini
+    # 호출을 대체한다. v1 임베딩 단계에서 설치돼 있었지만 여기 명시가 없어
+    # 새 환경에서 재현이 안 됐다(2026-08-18 추가).
+    "scikit-learn>=1.5",
+    "numpy>=1.26",
+    "joblib>=1.4",
+    # 다국어 문장 임베딩 방식용. torch를 끌고 와 무겁기 때문에 선택 설치로
+    # 두고, 없으면 문자 n-gram TF-IDF 방식만 채점된다.
+    # ./.venv/Scripts/python.exe -m pip install -e ".[embedding]"
 ]
 
 [project.optional-dependencies]
+embedding = [
+    "sentence-transformers>=3.0",
+]
 dev = [
     "pytest>=8.0",
 ]

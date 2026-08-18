@@ -179,15 +179,16 @@ def fetch_all_labels(conn) -> list[dict]:
     하기 때문이다(004 헤더 (3) 참고). fixed_keywords는 매주 wipe 대상이
     아니라 JOIN이 항상 성립한다.
 
-    period_start도 함께 — 모델 평가 시 (주차 × 키워드) 그룹 단위로 fold를
-    나누는 데 쓴다(기사 단위로 쪼개면 같은 주 같은 키워드 기사가 학습·검증에
-    나뉘어 들어가 점수가 부풀려진다).
+    url_norm·period_start도 함께 — 평가에서 fold를 나눌 그룹 키로 쓴다.
+    같은 기사가 여러 키워드에 걸쳐 라벨돼 있어(실측 262건 중 56개 URL) 그냥
+    무작위로 쪼개면 같은 기사가 학습·검증 양쪽에 들어가 점수가 부풀려진다.
+    relevance_model.build_groups 참고.
     """
     with conn.cursor() as cur:
         cur.execute(
             """
             SELECT l.id, l.fixed_keyword_id, fk.keyword AS fixed_keyword,
-                   l.label, l.title, l.snippet, l.url, l.source_domain,
+                   l.label, l.title, l.snippet, l.url, l.url_norm, l.source_domain,
                    l.published_at, l.source_table, l.period_start, l.labeled_at
             FROM article_labels l
             JOIN fixed_keywords fk ON fk.id = l.fixed_keyword_id

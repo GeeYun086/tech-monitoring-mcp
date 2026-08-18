@@ -13,7 +13,12 @@
        그리면 클릭마다 전체 재렌더가 걸리고 어디까지 했는지도 놓친다.
        라벨을 저장하면 그 기사는 후보에서 빠지므로 rerun만으로 자연히
        다음 기사가 나온다.
-    3. 고정 키워드(모니터링 대상 시장) 탭
+    3. 📈 성능 탭 — 라벨을 정답지로 삼아 분류기를 채점한다(relevance_model).
+       라벨 수가 적을 때는 클래스 분포만 보여주고, 최소 기준을 넘으면 버튼을
+       눌러 측정한다 — 클릭마다 자동 학습하면 임베딩 모델 로드(수십 초)가
+       매번 걸려 라벨링 자체가 느려진다. 정확도는 항상 "찍기 기준선"과
+       나란히 보여준다(쏠린 라벨에서 정확도만 보면 착시가 생긴다).
+    4. 고정 키워드(모니터링 대상 시장) 탭
        - 주간 이슈 기사(주요 콘텐츠) — top20 등으로 안 자르고 이번 주
          수집분 전체를 최신순으로 보여준다(2026-08-13 담당자 확인 —
          나중에 라벨링 작업에 쓸 예정이라 넉넉하게).
@@ -33,6 +38,7 @@ import streamlit as st
 
 from tech_monitoring import dashboard_queries as dq
 from tech_monitoring import labeling
+from tech_monitoring import relevance_model
 from tech_monitoring.collectors.search_engine import search_once
 from tech_monitoring.db.connection import get_connection
 from tech_monitoring.db.weekly_run import get_run_period
@@ -198,6 +204,127 @@ def _render_labeling_tab(conn, run_id: int, fixed_keywords: list[dict], period_s
     _render_labeling_card(conn, pending[0], fixed_keyword, period_start)
 
 
+@st.cache_data(show_spinner=False)
+def _measure(_labels: list[dict], cache_key: tuple) -> list[dict]:
+    """채점 결과를 캐시한다. cache_key에 라벨 수·분포를 넣어, 라벨이 늘면
+    자동으로 다시 재고 그 전까지는 재렌더마다 다시 학습하지 않게 한다
+    (임베딩 방식은 모델 로드에만 수십 초가 걸려 매번 돌리면 못 쓴다).
+    _labels는 앞에 밑줄을 붙여 해시 대상에서 제외한다(dict 리스트라 해시 불가)."""
+    return relevance_model.evaluate_all(_labels)
+
+
+def _render_distribution(distribution: dict) -> None:
+    st.markdown("**라벨 분포**")
+    left, right = st.columns([1, 2])
+    left.metric("전체 라벨", f"{distribution['total']}건")
+    left.metric("도움됨 비율", f"{distribution['positive_rate']:.0%}")
+    right.bar_chart({
+        "도움됨": distribution["relevant"],
+        "도움 안 됨": distribution["irrelevant"],
+    }, horizontal=True)
+
+    if distribution["total"] and distribution["majority_accuracy"] >= 0.8:
+        st.warning(
+            f"라벨이 한쪽으로 크게 쏠려 있습니다(찍기만 해도 정확도 "
+            f"{distribution['majority_accuracy']:.0%}). 이 상태로는 정확도가 착시를 주니 "
+            "적은 쪽 라벨을 더 모으고, 아래 Precision·Recall·AUC를 함께 보세요."
+        )
+
+
+def _render_metrics(result: dict, baseline: float) -> None:
+    metrics = result["metrics"]
+    cv = result["cv"]
+    st.caption(
+        f"교차검증: {cv['group_kind']} 단위 {cv['n_splits']}-fold({cv['n_groups']}개 그룹) — "
+        "학습에 쓰지 않은 조각으로만 채점했습니다."
+    )
+
+    row = st.columns(5)
+    row[0].metric("Precision", f"{metrics['precision']:.3f}", help="도움됨이라 한 것 중 실제로 도움된 비율")
+    row[1].metric("Recall", f"{metrics['recall']:.3f}", help="실제 도움되는 기사 중 찾아낸 비율")
+    row[2].metric("F1", f"{metrics['f1']:.3f}", help="Precision과 Recall의 균형")
+    row[3].metric("AUC", f"{metrics['auc']:.3f}", help="순위를 매기는 능력. 0.5는 찍기와 같음")
+    # 정확도는 반드시 찍기 기준선과 함께 — 단독으로는 쏠린 라벨에서 착시를 준다.
+    row[4].metric(
+        "정확도", f"{metrics['accuracy']:.3f}",
+        delta=f"{metrics['accuracy'] - baseline:+.3f} vs 찍기",
+        help=f"무조건 다수 쪽으로 답하는 분류기는 {baseline:.3f}입니다. 이걸 넘어야 의미가 있습니다.",
+    )
+
+    ranking = {k: v for k, v in metrics.items() if k.startswith(("precision_at", "ndcg_at"))}
+    if ranking:
+        st.markdown("**순위 지표** — 시장별로 따로 순위를 매겨 평균낸 값입니다.")
+        cols = st.columns(len(ranking))
+        for col, (key, value) in zip(cols, ranking.items()):
+            col.metric(key.replace("_at_", "@").replace("precision", "Precision").replace("ndcg", "NDCG"),
+                       f"{value:.3f}")
+
+
+def _render_performance_tab(conn) -> None:
+    st.subheader("📈 성능")
+    st.caption(
+        "라벨링한 판단을 정답지로 삼아, 분류기가 **처음 보는 기사**를 얼마나 맞히는지 채점합니다. "
+        "라벨이 늘어날 때마다 다시 측정하면 개선 추이를 볼 수 있습니다."
+    )
+
+    labels = labeling.fetch_all_labels(conn)
+    distribution = relevance_model.class_distribution(labels)
+    _render_distribution(distribution)
+    st.divider()
+
+    if distribution["total"] < relevance_model.MIN_LABELS_TO_TRAIN:
+        st.info(
+            f"성능 측정에는 라벨이 최소 {relevance_model.MIN_LABELS_TO_TRAIN}건 필요합니다 "
+            f"(현재 {distribution['total']}건). '🏷️ 라벨링' 탭에서 계속 진행해 주세요."
+        )
+        return
+
+    st.caption(
+        "문자 n-gram 방식과 다국어 문장 임베딩 방식을 같은 조건으로 채점해 더 나은 쪽을 저장합니다. "
+        "임베딩 방식은 모델을 불러오느라 첫 측정에 1분 정도 걸릴 수 있습니다."
+    )
+    cache_key = (distribution["total"], distribution["relevant"])
+    if st.button("성능 측정하기", type="primary"):
+        st.session_state["measured_key"] = cache_key
+    # 버튼은 눌린 그 순간에만 True라, 이후 다른 조작으로 재렌더되면 결과가
+    # 사라진다. 마지막으로 측정한 조건을 세션에 남겨 계속 보이게 하고,
+    # 라벨이 늘어 조건이 달라지면 다시 눌러 재측정하게 한다.
+    if st.session_state.get("measured_key") != cache_key:
+        if st.session_state.get("measured_key") is not None:
+            st.info("라벨이 늘었습니다. 다시 측정하면 갱신된 성능을 볼 수 있습니다.")
+        return
+
+    with st.spinner("두 방식을 채점하는 중입니다…"):
+        results = _measure(labels, cache_key)
+
+    for result in results:
+        st.markdown(f"#### {result['method']}")
+        if not result["ok"]:
+            st.info(f"측정 불가 — {result['reason']}")
+            continue
+        _render_metrics(result, distribution["majority_accuracy"])
+        st.write("")
+
+    best = results[0]
+    if not best.get("ok"):
+        return
+
+    if best["metrics"]["accuracy"] <= distribution["majority_accuracy"]:
+        st.warning(
+            "정확도가 찍기 기준선을 넘지 못했습니다. 아직 라벨이 부족하다는 신호이니 "
+            "더 모은 뒤 다시 측정해 주세요. (모델은 저장하지 않았습니다.)"
+        )
+        return
+
+    with st.spinner("가장 성능이 좋은 방식으로 최종 모델을 학습하는 중입니다…"):
+        estimator = relevance_model.train_final_model(labels, best["method"])
+        path = relevance_model.save_model(estimator, best["method"], best["metrics"])
+    st.success(
+        f"**{best['method']}** 방식이 가장 좋았습니다(F1 {best['metrics']['f1']:.3f}). "
+        f"이 모델을 `{path.name}`로 저장했습니다 — 파이프라인이 Gemini 대신 사용합니다."
+    )
+
+
 def _render_keyword_tab(conn, run_id: int, fixed_keyword: dict) -> None:
     keywords = dq.get_market_keywords(conn, run_id, fixed_keyword["id"])
 
@@ -247,12 +374,14 @@ def main() -> None:
     # 키워드 탭들과 나란히 두면 어느 시장을 라벨링 중인지가 탭 선택과
     # 뒤섞여 헷갈린다(라벨링 안에서 시장을 따로 고르게 했다).
     period_start, _period_end = get_run_period(conn, run["id"])
-    tabs = st.tabs(["🏷️ 라벨링"] + [kw["keyword"] for kw in fixed_keywords])
+    tabs = st.tabs(["🏷️ 라벨링", "📈 성능"] + [kw["keyword"] for kw in fixed_keywords])
 
     with tabs[0]:
         _render_labeling_tab(conn, run["id"], fixed_keywords, period_start)
+    with tabs[1]:
+        _render_performance_tab(conn)
 
-    for tab, kw in zip(tabs[1:], fixed_keywords):
+    for tab, kw in zip(tabs[2:], fixed_keywords):
         with tab:
             _render_keyword_tab(conn, run["id"], kw)
 
