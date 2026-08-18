@@ -141,6 +141,13 @@ v3 나란히 비교하려고 의도적으로 그렇게 만듦, `pipeline_v3.py` 
 착시다. 화면에도 `+0.000 vs 찍기` 형태로 함께 표시하고, 기준선을 못 넘으면
 모델을 저장하지 않는다.
 
+**라벨은 사람 단위로 남는다**(`labeled_by`, 005). 앱은 각자 띄우고 DB는 공용
+하나를 쓰는 배포가 목표라, 이 값이 없으면 나중에 라벨한 사람이 앞사람 판단을
+조용히 덮어쓴다. `.env`의 `LABELED_BY`로 지정하고(비우면 `local`), 기본 동작은
+**내 라벨만으로 학습·집계**한다 — 팀 전체로 학습하려면
+`fetch_all_labels(conn, labeled_by=ALL_LABELERS)`를 쓴다. 개인 모델과 통합 모델
+중 어느 쪽이 나은지는 라벨이 쌓인 뒤 같은 채점 틀로 비교해서 정한다.
+
 ## 대시보드
 
 ```bash
@@ -166,7 +173,7 @@ DB 연결 실패(Supabase 무료 티어는 7일 미사용 시 자동 일시정�
 | `search_results` | v2: 검색엔진에서 가져온 이번 주 원본 기사(top20 고정 없음) | 예 |
 | `collected_articles` | v3: 재선정 사이트 4개에서 통째로 수집한 원본(고정 키워드 무관) | 예 |
 | `article_keyword_relevance` | v3: "이 글 ↔ 이 고정 키워드 관련도" 판단(다대다) | 예 |
-| `article_labels` | 사람이 매긴 관련도 라벨(분류기 학습 데이터). `weekly_runs`를 참조하지 않고 원문을 스냅샷으로 복사해 둔다 | **아니오 — 학습 자산** |
+| `article_labels` | 사람이 매긴 관련도 라벨(분류기 학습 데이터). `weekly_runs`를 참조하지 않고 원문을 스냅샷으로 복사해 둔다. `labeled_by`로 라벨 주체를 함께 남긴다(005) | **아니오 — 학습 자산** |
 | `market_keywords` | v2/v3 공용 — "이번 주 주요 키워드" 최종 목록. `pipeline` 컬럼(`search_engine`/`rss_llm`)으로 구분 | 예 |
 
 `market_keywords.canonical_phrase` + `variant_phrases`(병합된 원본 표기들,
@@ -228,7 +235,7 @@ src/tech_monitoring/
   db/connection.py, db/migrate.py, db/weekly_run.py
   pipeline_v2.py                  # v2 오케스트레이터(매주 wipe 담당)
   pipeline_v3.py                  # v3 오케스트레이터(wipe 안 함 — v2 이후 실행)
-db/migrations/          # v2(001) + v3(002) + 검색어(003) + 라벨(004) 스키마
+db/migrations/          # v2(001) + v3(002) + 검색어(003) + 라벨(004) + 라벨 주체(005) 스키마
 db/migrations_v1_archive/  # v1 스키마(참고용, 더 이상 적용 안 됨)
 scripts/manage_fixed_keywords.py
 scripts/train_relevance_classifier.py   # 라벨 → 분류기 학습 + 성능 출력

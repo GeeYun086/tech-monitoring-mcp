@@ -27,6 +27,11 @@ class _FakeCursor:
     def __exit__(self, *exc):
         return False
 
+    def _labels(self) -> list[dict]:
+        """article_labels 행. labeled_by를 안 적은 픽스처는 기본 라벨러로 본다
+        (005 이전에 쓴 테스트가 그대로 통과해야 한다 — DB 기본값도 'local')."""
+        return [{"labeled_by": "local", **r} for r in self._tables.get("article_labels", [])]
+
     def _set(self, cols, rows):
         self.description = [type("Col", (), {"name": n})() for n in cols]
         self._rows = [tuple(r.get(c) for c in cols) for r in rows]
@@ -38,14 +43,21 @@ class _FakeCursor:
             self._inserts.append(params)
             self._rows = []
         elif "SELECT url_norm FROM article_labels" in query:
-            (fixed_keyword_id,) = params
-            rows = [r for r in self._tables.get("article_labels", [])
-                    if r["fixed_keyword_id"] == fixed_keyword_id]
+            fixed_keyword_id, labeled_by = params
+            rows = [r for r in self._labels()
+                    if r["fixed_keyword_id"] == fixed_keyword_id
+                    and r["labeled_by"] == labeled_by]
             self._set(("url_norm",), rows)
         elif "count(*) FROM article_labels" in query:
-            rows = self._tables.get("article_labels", [])
-            if params:
-                rows = [r for r in rows if r["fixed_keyword_id"] == params[0]]
+            # WHERE 절이 조건에 따라 붙었다 말았다 하므로 질의 문자열을 보고
+            # params를 순서대로 꺼낸다(labeling.count_labels와 같은 순서).
+            rows, rest = self._labels(), list(params)
+            if "fixed_keyword_id = %s" in query:
+                wanted = rest.pop(0)   # 컴프리헨션 안에서 꺼내면 행마다 pop된다
+                rows = [r for r in rows if r["fixed_keyword_id"] == wanted]
+            if "labeled_by = %s" in query:
+                wanted = rest.pop(0)
+                rows = [r for r in rows if r["labeled_by"] == wanted]
             counts: dict[str, int] = {}
             for r in rows:
                 counts[r["label"]] = counts.get(r["label"], 0) + 1
@@ -53,9 +65,14 @@ class _FakeCursor:
         elif "FROM article_labels l" in query:
             keywords = {k["id"]: k["keyword"] for k in self._tables.get("fixed_keywords", [])}
             rows = [{**r, "fixed_keyword": keywords[r["fixed_keyword_id"]]}
-                    for r in self._tables.get("article_labels", [])
-                    if r["fixed_keyword_id"] in keywords]
-            self._set(("id", "fixed_keyword_id", "fixed_keyword", "label", "title"), rows)
+                    for r in self._labels() if r["fixed_keyword_id"] in keywords]
+            if "l.labeled_by = %s" in query:
+                (labeled_by,) = params
+                rows = [r for r in rows if r["labeled_by"] == labeled_by]
+            self._set(
+                ("id", "fixed_keyword_id", "fixed_keyword", "label", "title", "labeled_by"),
+                rows,
+            )
         elif "FROM search_results" in query:
             run_id, fixed_keyword_id = params
             rows = [r for r in self._tables.get("search_results", [])
@@ -80,6 +97,13 @@ class _FakeConn:
 
     def cursor(self):
         return _FakeCursor(self.tables, self.inserts)
+
+
+@pytest.fixture(autouse=True)
+def _fixed_labeler(monkeypatch):
+    """라벨러 기본값을 고정한다 — .env의 LABELED_BY가 채워져 있으면 테스트
+    결과가 실행 환경에 따라 달라지기 때문이다(005 참고)."""
+    monkeypatch.setattr(labeling.settings, "labeled_by", "local")
 
 
 def _article(url, *, run_id=1, fixed_keyword_id=1, title="제목", published_at=None):
@@ -136,6 +160,20 @@ def test_label_for_another_keyword_does_not_hide_the_article():
     assert [r["url"] for r in result] == ["https://a.com/1"]
 
 
+def test_another_persons_label_does_not_hide_the_article():
+    """공용 DB(005)에서 남이 이미 판단한 기사도 내 후보로는 남아야 한다 —
+    빼버리면 같은 기사에 대한 내 기준이 학습 데이터에 들어갈 길이 없다."""
+    conn = _FakeConn(
+        search_results=[_article("https://a.com/1")],
+        article_labels=[{"fixed_keyword_id": 1, "url_norm": "https://a.com/1",
+                         "label": "relevant", "labeled_by": "동료"}],
+    )
+
+    result = labeling.fetch_unlabeled_candidates(conn, run_id=1, fixed_keyword_id=1)
+
+    assert [r["url"] for r in result] == ["https://a.com/1"]
+
+
 def test_same_article_collected_by_both_pipelines_appears_once():
     conn = _FakeConn(
         search_results=[_article("https://a.com/1")],
@@ -184,6 +222,29 @@ def test_save_label_snapshots_article_fields():
     assert params[9] == date(2026, 8, 10)       # period_start
 
 
+def test_save_label_records_who_labeled_it():
+    """005 — 라벨 주체가 함께 저장돼야 나중에 개인 모델/통합 모델을 갈라
+    채점할 수 있다. 안 적어두면 소급이 불가능하다."""
+    conn = _FakeConn()
+    article = {**_article("https://a.com/1"), "source_table": "search_results"}
+
+    labeling.save_label(conn, 1, article, labeling.LABEL_RELEVANT, date(2026, 8, 10),
+                        labeled_by="지윤")
+
+    (params,) = conn.inserts
+    assert params[10] == "지윤"
+
+
+def test_save_label_falls_back_to_configured_labeler():
+    conn = _FakeConn()
+    article = {**_article("https://a.com/1"), "source_table": "search_results"}
+
+    labeling.save_label(conn, 1, article, labeling.LABEL_RELEVANT, date(2026, 8, 10))
+
+    (params,) = conn.inserts
+    assert params[10] == "local"
+
+
 def test_save_label_rejects_unknown_label():
     """DB CHECK 제약에 도달하기 전에 코드에서 먼저 막는다(오타로 조용히 들어가면
     학습 데이터가 오염된다)."""
@@ -210,6 +271,39 @@ def test_count_labels_reports_class_distribution():
     assert labeling.count_labels(conn, fixed_keyword_id=2) == {
         "relevant": 0, "irrelevant": 1, "total": 1,
     }
+
+
+def test_count_labels_counts_only_my_labels_by_default():
+    """진행률이 남의 작업량까지 더해 부풀면 내가 얼마나 했는지 알 수 없다."""
+    conn = _FakeConn(article_labels=[
+        {"fixed_keyword_id": 1, "url_norm": "u1", "label": "relevant"},
+        {"fixed_keyword_id": 1, "url_norm": "u2", "label": "relevant", "labeled_by": "동료"},
+    ])
+
+    assert labeling.count_labels(conn) == {"relevant": 1, "irrelevant": 0, "total": 1}
+    assert labeling.count_labels(conn, labeled_by=labeling.ALL_LABELERS) == {
+        "relevant": 2, "irrelevant": 0, "total": 2,
+    }
+
+
+def test_fetch_all_labels_can_learn_from_everyone_or_just_me():
+    """개인 모델(기본)과 통합 모델을 같은 함수로 뽑을 수 있어야, 나중에
+    어느 쪽이 나은지 같은 채점 틀로 비교할 수 있다(005)."""
+    conn = _FakeConn(
+        fixed_keywords=[{"id": 1, "keyword": "교육"}],
+        article_labels=[
+            {"id": 10, "fixed_keyword_id": 1, "url_norm": "u1", "label": "relevant",
+             "title": "내 판단"},
+            {"id": 11, "fixed_keyword_id": 1, "url_norm": "u2", "label": "irrelevant",
+             "title": "동료 판단", "labeled_by": "동료"},
+        ],
+    )
+
+    mine = labeling.fetch_all_labels(conn)
+    everyone = labeling.fetch_all_labels(conn, labeled_by=labeling.ALL_LABELERS)
+
+    assert [r["title"] for r in mine] == ["내 판단"]
+    assert [r["labeled_by"] for r in everyone] == ["local", "동료"]
 
 
 def test_fetch_all_labels_joins_keyword_text():

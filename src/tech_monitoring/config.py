@@ -30,5 +30,11 @@ class Settings(BaseSettings):
     # 높다(preview 모델은 정식 출시되며 모델 ID가 바뀌어 또 깨질 수 있음).
     gemini_model: str = "gemini-3.5-flash"  # 무료 티어(2026-08-13 실측 기준)
 
+    # 라벨을 매기는 사람(db/migrations/005_label_owner.sql). 앱은 각자 띄우고
+    # DB는 공용 하나를 쓰는 배포에서, 이 값이 서로 달라야 라벨이 덮어써지지
+    # 않는다. 기본값 "local"은 혼자 쓰는 개인 DB용이고, 공용 DB에 붙일 때는
+    # .env에 LABELED_BY로 각자 다른 값을 넣는다.
+    labeled_by: str = "local"
+
 
 settings = Settings()
