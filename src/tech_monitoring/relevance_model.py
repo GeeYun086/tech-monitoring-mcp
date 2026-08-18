@@ -158,6 +158,56 @@ def ranking_metrics(labels: list[dict], y: np.ndarray, scores: np.ndarray, k: in
     return {f"precision_at_{k}": float(np.mean(precisions)), f"ndcg_at_{k}": float(np.mean(ndcgs))}
 
 
+def _safe_auc(y: np.ndarray, scores: np.ndarray) -> float | None:
+    """한 시장의 라벨이 전부 같은 클래스면 AUC는 정의되지 않는다 — 0으로
+    적으면 "성능이 나쁘다"로 오해되므로 None으로 비워 둔다."""
+    if len(set(y)) < 2:
+        return None
+    return float(roc_auc_score(y, scores))
+
+
+def per_market_metrics(
+    labels: list[dict], y: np.ndarray, scores: np.ndarray, k: int = DEFAULT_K,
+) -> list[dict]:
+    """시장(고정 키워드)별 성능 분해.
+
+    전체 통합 점수만 보면 "교육은 잘 맞히는데 비즈니스 실적은 못 맞힌다"가
+    평균에 묻힌다. 어느 시장의 라벨을 더 모아야 하는지는 이 표에서만 보인다.
+
+    입력은 evaluate()가 이미 계산해 둔 out-of-fold 확률이라, 시장별로 다시
+    학습하지 않는다(임베딩 방식일 때 시장 수만큼 재학습하면 훨씬 느려진다).
+    """
+    buckets: dict[str, list[int]] = {}
+    for i, row in enumerate(labels):
+        buckets.setdefault(row["fixed_keyword"], []).append(i)
+
+    rows = []
+    for market, idx in sorted(buckets.items()):
+        market_y = y[idx]
+        market_scores = scores[idx]
+        market_pred = (market_scores >= 0.5).astype(int)
+        positive = int(market_y.sum())
+        total = len(market_y)
+        majority = max(positive, total - positive)
+
+        ordered = np.array([rel for _s, rel in sorted(zip(market_scores, market_y), key=lambda p: -p[0])])
+        rows.append({
+            "fixed_keyword": market,
+            "n_labels": total,
+            "relevant": positive,
+            "positive_rate": float(positive / total) if total else 0.0,
+            "majority_accuracy": float(majority / total) if total else 0.0,
+            "precision": float(precision_score(market_y, market_pred, zero_division=0)),
+            "recall": float(recall_score(market_y, market_pred, zero_division=0)),
+            "f1": float(f1_score(market_y, market_pred, zero_division=0)),
+            "accuracy": float((market_pred == market_y).mean()),
+            "auc": _safe_auc(market_y, market_scores),
+            f"precision_at_{k}": precision_at_k(ordered, k),
+            f"ndcg_at_{k}": ndcg_at_k(ordered, k),
+        })
+    return rows
+
+
 def class_distribution(labels: list[dict]) -> dict:
     """학습 전에 반드시 봐야 하는 쏠림(모듈 docstring (2))."""
     _texts, y = build_xy(labels)
@@ -229,6 +279,7 @@ def evaluate(labels: list[dict], method: str = "tfidf", k: int = DEFAULT_K) -> d
     }
 
     return {**result, "ok": True, "reason": None, "metrics": metrics,
+            "per_market": per_market_metrics(labels, y, probabilities, k=k),
             "cv": {"group_kind": group_kind, "n_splits": n_splits, "n_groups": len(set(groups))}}
 
 

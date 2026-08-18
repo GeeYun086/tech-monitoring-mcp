@@ -259,6 +259,47 @@ def _render_metrics(result: dict, baseline: float) -> None:
             col.metric(key.replace("_at_", "@").replace("precision", "Precision").replace("ndcg", "NDCG"),
                        f"{value:.3f}")
 
+    _render_per_market(result.get("per_market", []))
+
+
+def _render_per_market(per_market: list[dict]) -> None:
+    """시장별 분해 — 위의 통합 점수는 3개 시장 평균이라 "교육은 잘 맞히는데
+    비즈니스 실적은 못 맞힌다"가 묻힌다. 어느 시장 라벨을 더 모아야 하는지는
+    이 표에서만 보인다."""
+    if not per_market:
+        return
+
+    with st.expander("시장별 성능 (위 점수는 전체 통합값입니다)", expanded=True):
+        st.caption(
+            "정확도는 그 시장의 '찍기' 기준선과 함께 보세요 — 찍기보다 낮으면 "
+            "그 시장은 아직 라벨이 부족하다는 뜻입니다. AUC의 '—'는 그 시장 라벨이 "
+            "한쪽 종류뿐이라 계산할 수 없다는 표시입니다(성능이 0이라는 뜻이 아닙니다)."
+        )
+        rows = []
+        for m in per_market:
+            gap = m["accuracy"] - m["majority_accuracy"]
+            rows.append({
+                "시장": m["fixed_keyword"],
+                "라벨": f"{m['n_labels']}건",
+                "도움됨 비율": f"{m['positive_rate']:.0%}",
+                "정확도": f"{m['accuracy']:.3f}",
+                "찍기": f"{m['majority_accuracy']:.3f}",
+                "찍기 대비": f"{gap:+.3f}",
+                "Precision": f"{m['precision']:.3f}",
+                "Recall": f"{m['recall']:.3f}",
+                "F1": f"{m['f1']:.3f}",
+                "AUC": f"{m['auc']:.3f}" if m["auc"] is not None else "—",
+            })
+        st.dataframe(rows, hide_index=True, use_container_width=True)
+
+        weak = [m["fixed_keyword"] for m in per_market
+                if m["accuracy"] <= m["majority_accuracy"]]
+        if weak:
+            st.warning(
+                f"**{', '.join(weak)}** 시장은 찍기 기준선을 넘지 못했습니다. "
+                "해당 시장의 라벨을 더 모으면 개선될 가능성이 높습니다."
+            )
+
 
 def _render_performance_tab(conn) -> None:
     st.subheader("📈 성능")

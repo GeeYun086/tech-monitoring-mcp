@@ -205,3 +205,55 @@ def test_load_model_returns_none_when_not_trained_yet(tmp_path):
     """아직 학습한 적 없는 상태를 호출부가 구분할 수 있어야 한다
     (파이프라인이 모델 없이 조용히 오작동하면 안 된다)."""
     assert rm.load_model(tmp_path / "없는파일.joblib") is None
+
+
+# --- 시장별 분해 -----------------------------------------------------------
+
+def test_per_market_splits_metrics_by_market():
+    """전체 평균에 묻히는 "어느 시장이 약한가"를 드러내야 한다."""
+    labels = [_label("교육", "a", "relevant", "u1"), _label("교육", "b", "irrelevant", "u2"),
+              _label("비즈니스 실적", "c", "relevant", "u3"), _label("비즈니스 실적", "d", "irrelevant", "u4")]
+    y = np.array([1, 0, 1, 0])
+    # 교육은 완벽히 맞히고, 비즈니스 실적은 정확히 거꾸로 예측한 경우
+    scores = np.array([0.9, 0.1, 0.1, 0.9])
+
+    rows = {r["fixed_keyword"]: r for r in rm.per_market_metrics(labels, y, scores, k=2)}
+
+    assert rows["교육"]["accuracy"] == 1.0
+    assert rows["비즈니스 실적"]["accuracy"] == 0.0
+    assert rows["교육"]["n_labels"] == 2
+
+
+def test_per_market_reports_its_own_baseline():
+    """시장마다 쏠림 정도가 다르므로 찍기 기준선도 시장별로 나와야 한다."""
+    labels = ([_label("교육", f"a{i}", "relevant", f"u{i}") for i in range(9)]
+              + [_label("교육", "b", "irrelevant", "u9")]
+              + [_label("실적", f"c{i}", "relevant", f"v{i}") for i in range(5)]
+              + [_label("실적", f"d{i}", "irrelevant", f"w{i}") for i in range(5)])
+    y = np.array([1] * 9 + [0] + [1] * 5 + [0] * 5)
+    scores = np.linspace(0.1, 0.9, len(y))
+
+    rows = {r["fixed_keyword"]: r for r in rm.per_market_metrics(labels, y, scores)}
+
+    assert rows["교육"]["majority_accuracy"] == 0.9   # 9:1로 쏠림
+    assert rows["실적"]["majority_accuracy"] == 0.5   # 5:5로 균형
+
+
+def test_per_market_auc_is_none_when_market_has_one_class():
+    """한쪽 클래스뿐이면 AUC는 정의되지 않는다 — 0으로 적으면 "성능 나쁨"으로
+    오해되므로 비워 둬야 한다."""
+    labels = [_label("교육", "a", "relevant", "u1"), _label("교육", "b", "relevant", "u2")]
+    y = np.array([1, 1])
+    scores = np.array([0.9, 0.8])
+
+    (row,) = rm.per_market_metrics(labels, y, scores)
+
+    assert row["auc"] is None
+
+
+def test_evaluate_includes_per_market_breakdown():
+    result = rm.evaluate(_dataset(), method="tfidf")
+
+    markets = {r["fixed_keyword"] for r in result["per_market"]}
+    assert markets == {"교육", "비즈니스 실적"}
+    assert sum(r["n_labels"] for r in result["per_market"]) == result["n_labels"]
