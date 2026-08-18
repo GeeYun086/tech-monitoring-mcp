@@ -89,43 +89,55 @@ def get_market_keywords(conn, run_id: int, fixed_keyword_id: int, limit: int = 3
         return [dict(zip(columns, row)) for row in cur.fetchall()]
 
 
-def get_search_results(conn, run_id: int, fixed_keyword_id: int, limit: int = 20) -> list[dict]:
-    """키워드 선택 없이 기본으로 보여줄 이번 주 기사 — 검색엔진 원 순위(rank) 기준."""
+def get_search_results(conn, run_id: int, fixed_keyword_id: int, limit: int | None = None) -> list[dict]:
+    """키워드 선택 없이 기본으로 보여줄 이번 주 기사 — 최신순(published_at) 정렬.
+
+    2026-08-13 이전엔 rank(검색엔진 내 순위) 기준으로 정렬했는데, rank는
+    사이트마다 1부터 따로 매겨지는 값이다(collectors/search_engine.py가
+    사이트별로 개별 호출) — 여러 사이트를 rank로 한데 정렬하면 결과 수가
+    많은 사이트(TechCrunch)가 사실상 상위를 독점해서 AITimes 등 다른 사이트
+    기사가 화면에 전혀 안 보이는 문제가 실사용 중 확인됐다. published_at
+    기준 최신순이 사이트 간에 공정하다.
+
+    limit=None(기본값)은 이번 주 수집분 전체를 반환한다 — top20으로
+    자르지 않는다는 원래 설계 원칙(README 참고) + 담당자가 나중에 라벨링
+    작업에 쓸 수 있게 넉넉히 보고 싶다고 확인(2026-08-13)."""
+    query = (
+        "SELECT title, url, snippet, source_domain, published_at, rank "
+        "FROM search_results WHERE run_id = %s AND fixed_keyword_id = %s "
+        "ORDER BY published_at DESC NULLS LAST"
+    )
+    params: list = [run_id, fixed_keyword_id]
+    if limit is not None:
+        query += " LIMIT %s"
+        params.append(limit)
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT title, url, snippet, source_domain, published_at, rank
-            FROM search_results
-            WHERE run_id = %s AND fixed_keyword_id = %s
-            ORDER BY rank ASC
-            LIMIT %s
-            """,
-            (run_id, fixed_keyword_id, limit),
-        )
+        cur.execute(query, params)
         columns = [c.name for c in cur.description]
         return _apply_summary_truncation([dict(zip(columns, row)) for row in cur.fetchall()])
 
 
 def get_search_results_for_variants(
-    conn, run_id: int, fixed_keyword_id: int, variant_phrases: list[str], limit: int = 20,
+    conn, run_id: int, fixed_keyword_id: int, variant_phrases: list[str], limit: int | None = None,
 ) -> list[dict]:
     """특정 키워드(동의어 그룹) 선택 시 — 제목·스니펫에 변형 표기 중 하나라도
     포함된 기사만. "사건 단위"가 아니라 "키워드 언급 기사 전체"라는 v2의
-    더 넓은 범주를 그대로 반영한다(README 참고)."""
+    더 넓은 범주를 그대로 반영한다(README 참고). get_search_results와 같은
+    이유로 published_at 최신순, limit=None 기본값."""
     if not variant_phrases:
         return []
     patterns = [f"%{v}%" for v in variant_phrases]
+    query = (
+        "SELECT title, url, snippet, source_domain, published_at, rank "
+        "FROM search_results WHERE run_id = %s AND fixed_keyword_id = %s "
+        "AND (title ILIKE ANY(%s) OR snippet ILIKE ANY(%s)) "
+        "ORDER BY published_at DESC NULLS LAST"
+    )
+    params: list = [run_id, fixed_keyword_id, patterns, patterns]
+    if limit is not None:
+        query += " LIMIT %s"
+        params.append(limit)
     with conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT title, url, snippet, source_domain, published_at, rank
-            FROM search_results
-            WHERE run_id = %s AND fixed_keyword_id = %s
-              AND (title ILIKE ANY(%s) OR snippet ILIKE ANY(%s))
-            ORDER BY rank ASC
-            LIMIT %s
-            """,
-            (run_id, fixed_keyword_id, patterns, patterns, limit),
-        )
+        cur.execute(query, params)
         columns = [c.name for c in cur.description]
         return _apply_summary_truncation([dict(zip(columns, row)) for row in cur.fetchall()])

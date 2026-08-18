@@ -11,7 +11,7 @@ Tavily가 오히려 더 잘 맞는 부분:
 - `include_domains`/`exclude_domains`를 API 파라미터로 직접 받아서(최대
   300/150개) Google처럼 별도 "검색엔진(cx)"을 웹 UI에서 미리 만들어둘
   필요가 없다.
-- `time_range="week"`로 기간 제한 네이티브 지원(dateRestrict=w1과 동일 효과).
+- `start_date`/`end_date`로 정확한 날짜 범위 지정 네이티브 지원.
 - `topic="news"`로 이슈·뉴스 중심 결과에 더 특화.
 - 무료 티어 월 1,000크레딧, 신용카드 등록 불필요(Google 결제 계정 연결
   문제를 아예 겪지 않음).
@@ -31,10 +31,24 @@ Tavily는 페이지네이션이 없고 한 호출당 max_results가 최대 20건
 키워드 × 사이트 조합마다 개별 호출한다(3 키워드 × 6 사이트 = 18쿼리/주 —
 무료 한도(월 1,000크레딧, basic depth 1크레딧/회)에 여유가 크다).
 
+**기간 파라미터는 time_range가 아니라 start_date/end_date를 쓴다**
+(2026-08-13 수정). 원래 time_range="week"(호출 시점 기준 지난 7일 롤링
+윈도우)를 썼는데, 대시보드가 보여주는 weekly_runs.period_start/end(달력
+월~일)와 실제 검색 범위가 어긋나는 문제가 있었다(실행일이 수요일이면
+달력 주 전체가 아니라 그 전주 목요일부터 실행일까지만 검색됨). start_date/
+end_date로 이 run의 period_start/end(db/weekly_run.get_run_period)를
+그대로 넘기면 실제 검색 자체가 그 달력 주로 정확히 맞춰져 배너와 항상
+일치한다.
+
+**Techmeme는 Tavily 색인 커버리지 자체가 얕다**(2026-08-13 실측 —
+time_range를 한 달로 넓혀도 0건). 저희 화이트리스트 필터 문제가 아니라
+Tavily가 이 사이트를 잘 못 가져오는 것으로 보인다 — 알려진 한계로 남겨둔다.
+
     ./.venv/Scripts/python.exe -m tech_monitoring.collectors.search_engine
 """
 
 import fnmatch
+from datetime import date
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit
 
@@ -46,6 +60,7 @@ from tech_monitoring.db.weekly_run import (
     complete_weekly_run,
     fail_weekly_run,
     get_active_fixed_keywords,
+    get_run_period,
     start_weekly_run,
 )
 from tech_monitoring.utils.url_normalize import normalize_url
@@ -59,6 +74,7 @@ SITE_INCLUDE_PATTERNS = [
     "www.itworld.co.kr/article/*",
     "www.aitimes.com/*",
     "news.hada.io/weekly/*",
+    "news.hada.io/topic*",  # 2026-08-13: 위클리 다이제스트만으론 사실상 0건이라 개별 글까지 포함
     "*.techcrunch.com/*",
     "askedtech.com/knowledge-archive/*",
     "www.techmeme.com/*",
@@ -175,13 +191,14 @@ def search_once(query: str, num: int = 10) -> list[dict]:
     return [r for r in data.get("results", []) if r.get("url") and is_allowed_url(r["url"])]
 
 
-def _fetch_site_results(keyword: str, domain: str) -> list[dict]:
+def _fetch_site_results(keyword: str, domain: str, start_date: date, end_date: date) -> list[dict]:
     payload = {
         "query": keyword,
         "search_depth": "basic",  # 1크레딧/회(advanced는 2) — 무료 한도 절약
         "topic": "news",
         "max_results": RESULTS_PER_SITE,
-        "time_range": settings.tavily_time_range,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
         "include_domains": [domain],
     }
     return _tavily_request(payload).get("results", [])
@@ -212,14 +229,17 @@ def _insert_result(conn, *, run_id: int, fixed_keyword_id: int, query: str, rank
         return cur.fetchone() is not None
 
 
-def collect_for_keyword(conn, run_id: int, fixed_keyword: dict) -> dict:
-    """고정 키워드 하나에 대해 화이트리스트 사이트마다 개별 호출 후 저장."""
+def collect_for_keyword(
+    conn, run_id: int, fixed_keyword: dict, start_date: date, end_date: date,
+) -> dict:
+    """고정 키워드 하나에 대해 화이트리스트 사이트마다 개별 호출 후 저장.
+    start_date/end_date는 이 run의 달력 주(db/weekly_run.get_run_period)다."""
     keyword = fixed_keyword["keyword"]
     fetched = inserted = 0
 
     for domain in SITE_DOMAINS:
         try:
-            items = _fetch_site_results(keyword, domain)
+            items = _fetch_site_results(keyword, domain, start_date, end_date)
         except httpx.HTTPError as exc:
             return {"fixed_keyword": keyword, "fetched": fetched, "inserted": inserted, "error": str(exc)}
 
@@ -246,7 +266,8 @@ def collect_all(run_id: int) -> list[dict]:
         keywords = get_active_fixed_keywords(conn)
         if not keywords:
             return [{"fixed_keyword": None, "fetched": 0, "inserted": 0, "error": "fixed_keywords에 활성 키워드 없음"}]
-        return [collect_for_keyword(conn, run_id, kw) for kw in keywords]
+        start_date, end_date = get_run_period(conn, run_id)
+        return [collect_for_keyword(conn, run_id, kw, start_date, end_date) for kw in keywords]
     finally:
         conn.close()
 

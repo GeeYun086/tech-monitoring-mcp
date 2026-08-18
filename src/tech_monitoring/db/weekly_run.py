@@ -19,19 +19,19 @@ def get_active_fixed_keywords(conn) -> list[dict]:
 
 
 def _current_week_bounds(today: date | None = None) -> tuple[date, date]:
-    """실행일 기준 "지난 7일" 롤링 윈도우 — collectors/search_engine.py가
-    Tavily에 실제로 보내는 time_range="week"(호출 시점 기준 지난 7일)와
-    정확히 같은 범위여야 한다.
+    """이번 주 월~일 달력 주간.
 
-    2026-08-13에 겪은 버그: 원래 이 함수가 "이번 주 월~일" 달력 주간을
-    돌려줬는데, Tavily의 time_range="week"는 달력 주가 아니라 "실행 시점
-    기준 지난 7일"이라 둘이 다른 기간을 가리켰다(실행일이 수요일이면
-    달력 주는 그 주 월~일 전체를 말하지만, 실제 검색은 그 전주 목요일부터
-    실행일까지만 훑음). 그 결과 대시보드 배너("기준 기간: 8/10~8/16")와
-    실제 수집된 기사 날짜(8/6~8/13)가 어긋나 보였다. 이제는 항상 실행일을
-    끝점으로 하는 지난 7일로 맞춰서 배너와 실제 검색 범위가 항상 일치한다."""
+    2026-08-13에 "실행일 기준 지난 7일" 롤링 윈도우로 바꾼 적이 있는데
+    (Tavily time_range="week"가 그런 의미라서), 담당자가 달력 주 표시를
+    원해 다시 되돌렸다. 대신 이제 collectors/search_engine.py가
+    time_range 대신 이 period_start/end를 그대로 Tavily의 start_date/
+    end_date로 넘겨 실제 검색 자체를 이 달력 주로 정확히 맞춘다 — 그래서
+    배너 표시와 실제 수집 기사 날짜가 항상 일치한다(rolling window로
+    바꿨을 때와 달리, 이번엔 "표시"가 아니라 "실제 검색 범위"를 달력 주에
+    맞추는 방식이라 두 요구사항이 충돌하지 않는다)."""
     today = today or date.today()
-    return today - timedelta(days=6), today
+    monday = today - timedelta(days=today.weekday())
+    return monday, monday + timedelta(days=6)
 
 
 def start_weekly_run(conn, today: date | None = None) -> int:
@@ -49,6 +49,14 @@ def start_weekly_run(conn, today: date | None = None) -> int:
             (period_start, period_end),
         )
         return cur.fetchone()[0]
+
+
+def get_run_period(conn, run_id: int) -> tuple[date, date]:
+    """collectors/search_engine.py가 Tavily의 start_date/end_date를 이
+    run이 잡아둔 달력 주(period_start/end)에 정확히 맞추기 위해 조회한다."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT period_start, period_end FROM weekly_runs WHERE id = %s", (run_id,))
+        return cur.fetchone()
 
 
 def complete_weekly_run(conn, run_id: int) -> None:

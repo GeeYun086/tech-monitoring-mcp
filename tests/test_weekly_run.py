@@ -49,13 +49,15 @@ def test_get_active_fixed_keywords_queries_active_only_ordered():
     assert "ORDER BY display_order, id" in query
 
 
-def test_current_week_bounds_returns_rolling_7_days_ending_today():
-    """2026-08-13 실제로 겪은 버그의 회귀 테스트 — 달력 월~일이 아니라
-    "실행일 기준 지난 7일"이어야 한다(Tavily time_range="week"와 정확히
-    같은 범위여야 대시보드 배너와 실제 수집 기사 날짜가 어긋나지 않는다)."""
+def test_current_week_bounds_returns_monday_to_sunday():
+    # 2026-08-13은 목요일. Tavily 검색 자체를 이 달력 주(start_date/end_date)로
+    # 정확히 맞추므로(collectors/search_engine.py), 롤링 윈도우로 되돌아갈
+    # 필요 없이 배너 표시와 실제 검색 범위가 일치한다.
     start, end = wr._current_week_bounds(date(2026, 8, 13))
-    assert start == date(2026, 8, 7)
-    assert end == date(2026, 8, 13)
+    assert start == date(2026, 8, 10)
+    assert end == date(2026, 8, 16)
+    assert start.weekday() == 0
+    assert end.weekday() == 6
 
 
 def test_start_weekly_run_upserts_with_computed_bounds():
@@ -68,7 +70,19 @@ def test_start_weekly_run_upserts_with_computed_bounds():
     query, params = cursor.executed[0]
     assert "INSERT INTO weekly_runs" in query
     assert "ON CONFLICT" in query
-    assert params == (date(2026, 8, 7), date(2026, 8, 13))
+    assert params == (date(2026, 8, 10), date(2026, 8, 16))
+
+
+def test_get_run_period_returns_bounds():
+    cursor = _SpyCursor(fetchone_result=(date(2026, 8, 10), date(2026, 8, 16)))
+    conn = _SpyConn(cursor)
+
+    result = wr.get_run_period(conn, run_id=42)
+
+    assert result == (date(2026, 8, 10), date(2026, 8, 16))
+    query, params = cursor.executed[0]
+    assert "FROM weekly_runs" in query
+    assert params == (42,)
 
 
 def test_complete_weekly_run_updates_status():
