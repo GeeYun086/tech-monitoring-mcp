@@ -304,3 +304,33 @@ def test_labels_signature_changes_when_a_label_is_edited():
 
     assert rm.labels_signature(before) != rm.labels_signature(after)
     assert rm.labels_signature(before) == rm.labels_signature(list(before))
+
+
+def test_embedding_is_skipped_when_the_optional_package_is_missing(monkeypatch):
+    """배포(Streamlit Cloud)에는 torch를 안 넣는다 — 무료 티어 용량 제한 때문.
+    그때 임베딩 방식만 건너뛰고 tfidf 결과는 그대로 나와야 한다(앱이 죽으면
+    라벨링 자체를 못 한다)."""
+    def _no_package(texts):
+        raise ImportError("No module named 'sentence_transformers'")
+
+    monkeypatch.setattr(rm, "encode_texts", _no_package)
+
+    result = rm.evaluate(_dataset(), method="embedding")
+
+    assert result["ok"] is False
+    assert "sentence-transformers" in result["reason"]
+    # 분포는 여전히 나와야 한다(라벨링 중에도 봐야 하는 값).
+    assert result["distribution"]["total"] == 60
+
+
+def test_build_model_still_works_with_only_tfidf_available(monkeypatch):
+    """임베딩이 없어도 tfidf가 기준선을 넘으면 모델이 만들어져야 한다."""
+    def _no_package(texts):
+        raise ImportError("No module named 'sentence_transformers'")
+
+    monkeypatch.setattr(rm, "encode_texts", _no_package)
+
+    bundle = rm.build_model(_dataset())
+
+    assert bundle is not None
+    assert bundle["method"] == "tfidf"
