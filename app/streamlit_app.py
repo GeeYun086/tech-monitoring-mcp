@@ -146,15 +146,46 @@ def _render_keyword_expander(keywords: list[dict]) -> None:
             st.bar_chart({k["canonical_phrase"]: k["doc_count"] for k in top})
 
 
-def _render_labeling_progress(conn, fixed_keyword: dict, remaining: int) -> None:
+_ALL_WEEKS = "전체 기간"
+_UNDATED_LABEL = "날짜 미상"
+
+
+def _week_options(conn, run_id: int) -> dict:
+    """주차 선택 라벨 -> week_start 값. 소급 수집(작업 4)으로 한 run에 여러 주가
+    섞여 있어서, 한 주씩 골라 보고 라벨할 수 있어야 한다 — 후보가 최신순이라
+    필터 없이 진행하면 라벨이 최신 주에만 몰리고 주차 단위 교차검증이 성립하지
+    않는다(실측: 라벨 30건이 전부 한 주에 몰렸다)."""
+    options = {_ALL_WEEKS: None}
+    for week in dq.get_pool_weeks(conn, run_id):
+        if week["week_start"] is None:
+            options[f"{_UNDATED_LABEL} ({week['total']}건)"] = labeling.UNDATED
+        else:
+            options[f"{week['week_start']} 주 ({week['total']}건)"] = week["week_start"]
+    return options
+
+
+def _select_week(conn, run_id: int, key: str):
+    """주차 선택 위젯. 선택값(week_start)을 그대로 조회 함수에 넘기면 된다."""
+    options = _week_options(conn, run_id)
+    if len(options) <= 1:          # 한 주뿐이면 고를 게 없다
+        return None
+    label = st.selectbox("어느 주 기사를 볼까요?", list(options), key=key)
+    return options[label]
+
+
+def _render_labeling_progress(conn, fixed_keyword: dict, remaining: int, scoped: bool = False) -> None:
     counts = labeling.count_labels(conn, fixed_keyword["id"])
     done = counts["total"]
     total = done + remaining
 
     st.progress(done / total if total else 1.0)
+    # 주차를 골랐으면 남은 후보는 그 주 기준이라 진행률 분모와 단위가 다르다 —
+    # 같은 문장으로 적으면 "완료 30 / 91건"처럼 읽혀 오해를 부른다.
+    remaining_label = "선택한 주 남은 후보" if scoped else "남은 후보"
     st.caption(
-        f"**{fixed_keyword['keyword']}** — 라벨 완료 {done} / {total}건 "
-        f"(도움됨 {counts['relevant']} · 도움 안 됨 {counts['irrelevant']}) · 남은 후보 {remaining}건"
+        f"**{fixed_keyword['keyword']}** — 라벨 완료 {done}건 "
+        f"(도움됨 {counts['relevant']} · 도움 안 됨 {counts['irrelevant']}) · "
+        f"{remaining_label} {remaining}건"
     )
 
 
@@ -200,15 +231,20 @@ def _render_labeling_tab(conn, run_id: int, fixed_keywords: list[dict], period_s
     selected = st.selectbox("어느 시장 기준으로 라벨링할까요?", keyword_names, key="labeling_keyword")
     fixed_keyword = next(kw for kw in fixed_keywords if kw["keyword"] == selected)
 
-    candidates = labeling.fetch_unlabeled_candidates(conn, run_id, fixed_keyword["id"])
+    week_start = _select_week(conn, run_id, key="labeling_week")
+    candidates = labeling.fetch_unlabeled_candidates(
+        conn, run_id, fixed_keyword["id"], week_start=week_start,
+    )
     skipped = st.session_state.get("labeling_skipped", set())
     pending = [c for c in candidates if c["url_norm"] not in skipped]
 
-    _render_labeling_progress(conn, fixed_keyword, len(candidates))
+    _render_labeling_progress(conn, fixed_keyword, len(candidates), scoped=week_start is not None)
 
     if not pending:
         if skipped and candidates:
             st.info(f"보류한 {len(candidates)}건만 남았습니다. 새로고침하면 다시 볼 수 있습니다.")
+        elif week_start is not None:
+            st.success("선택한 주는 라벨링이 끝났습니다. 위에서 다른 주나 시장을 선택하세요.")
         else:
             st.success("이 시장은 라벨링이 끝났습니다. 위에서 다른 시장을 선택하세요.")
     else:
@@ -443,6 +479,7 @@ def _render_keyword_tab(conn, run_id: int, fixed_keyword: dict) -> None:
     _render_keyword_expander(keywords)
 
     st.markdown("**주간 이슈 기사**")
+    week_start = _select_week(conn, run_id, key=f"articles_week_{fixed_keyword['id']}")
     options = ["(전체)"] + [k["canonical_phrase"] for k in keywords]
     selected = st.selectbox(
         "키워드로 기사 필터링", options, key=f"kw_select_{fixed_keyword['id']}",
@@ -451,12 +488,16 @@ def _render_keyword_tab(conn, run_id: int, fixed_keyword: dict) -> None:
     # 006부터 기사는 시장과 무관한 공용 풀에서 온다 — 세 탭이 같은 목록을
     # 보여주고, 시장별 순서는 분류기 점수가 붙으면 갈라진다(작업 3).
     if selected == "(전체)":
-        articles = dq.get_pool_articles(conn, run_id, fixed_keyword["id"])
+        articles = dq.get_pool_articles(
+            conn, run_id, fixed_keyword["id"], week_start=week_start,
+        )
     else:
         variant_phrases = next(
             k["variant_phrases"] for k in keywords if k["canonical_phrase"] == selected
         )
-        articles = dq.get_pool_articles_for_variants(conn, run_id, variant_phrases)
+        articles = dq.get_pool_articles_for_variants(
+            conn, run_id, variant_phrases, week_start=week_start,
+        )
 
     st.caption(f"{len(articles)}건")
     _render_article_list(articles)

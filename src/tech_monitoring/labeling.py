@@ -40,6 +40,34 @@ VALID_LABELS = (LABEL_RELEVANT, LABEL_IRRELEVANT)
 ALL_LABELERS = "*"
 
 
+# 발행일이 없는 기사를 담는 주차 버킷(화면의 "날짜 미상"). 날짜 대신 쓰는
+# 값이라 date와 절대 겹치지 않는 문자열이어야 한다.
+UNDATED = "undated"
+
+
+def article_week_start(article: dict):
+    """기사 발행 주의 월요일. 발행일이 없으면 None.
+
+    라벨의 주차 그룹(period_start)과 화면의 주차 필터가 **같은 기준**을 써야
+    한다 — 한쪽은 발행 주, 다른 쪽은 수집 주로 묶으면 "8/10 주만 골라
+    라벨했는데 학습에서는 다른 주로 잡히는" 어긋남이 생긴다."""
+    published = article.get("published_at")
+    if published is None:
+        return None
+    day = published.date() if hasattr(published, "date") else published
+    monday, _end = week_bounds_for(day)
+    return monday
+
+
+def _matches_week(article: dict, week_start) -> bool:
+    """주차 필터 판정. week_start가 None이면 전체, UNDATED면 발행일 없는 것만."""
+    if week_start is None:
+        return True
+    if week_start == UNDATED:
+        return article.get("published_at") is None
+    return article_week_start(article) == week_start
+
+
 def _label_period_start(article: dict, run_period_start):
     """이 라벨을 어느 주로 묶을지 — **기사 발행 주**(월요일)를 쓴다.
 
@@ -53,12 +81,7 @@ def _label_period_start(article: dict, run_period_start):
     발행일이 없는 기사(Tavily가 published_date를 안 주는 경우)는 run의
     period_start로 폴백한다 — 최소한 수집 시점은 항상 알 수 있다.
     """
-    published = article.get("published_at")
-    if published is None:
-        return run_period_start
-    day = published.date() if hasattr(published, "date") else published
-    monday, _end = week_bounds_for(day)
-    return monday
+    return article_week_start(article) or run_period_start
 
 
 def _labeler(labeled_by: str | None) -> str:
@@ -132,11 +155,18 @@ def _fetch_collected_article_candidates(conn, run_id: int) -> list[dict]:
 
 def fetch_unlabeled_candidates(
     conn, run_id: int, fixed_keyword_id: int, labeled_by: str | None = None,
+    week_start=None,
 ) -> list[dict]:
     """이 run에서 이 고정 키워드에 대해 **이 사람이 아직 라벨을 안 매긴** 기사 목록.
 
     반환 행에는 url_norm이 함께 들어있다 — 화면이 save_label에 그대로
     넘기면 되고, 정규화를 두 번 하지 않는다.
+
+    week_start를 주면 그 발행 주만 남긴다(UNDATED면 발행일 없는 것만).
+    소급 수집분이 한 run에 3주치 섞여 있는데 후보가 최신순이라, 필터가 없으면
+    최신 주부터 순서대로 라벨하게 된다 — 그러면 라벨이 한 주에 몰려서
+    주차 단위 교차검증("다음 주 기사에도 통하는가")이 성립하지 않는다
+    (실측 2026-08-19: 라벨 30건이 전부 8/17 주였다).
     """
     labeled = fetch_labeled_url_norms(conn, fixed_keyword_id, labeled_by)
 
@@ -154,6 +184,8 @@ def fetch_unlabeled_candidates(
         if url_norm in labeled or url_norm in seen:
             continue
         seen.add(url_norm)
+        if not _matches_week(row, week_start):
+            continue
         unlabeled.append({**row, "url_norm": url_norm})
 
     return _sort_by_published_at_desc_nulls_last(unlabeled)
