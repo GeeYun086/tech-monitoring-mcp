@@ -2,12 +2,18 @@
 스텁으로 교체, 순서·실패 격리 검증). _start_run/_finish_run도 스텁으로 바꿔
 실제 DB 연결 없이 오케스트레이션 로직만 검증한다."""
 
+from datetime import date
+
 from tech_monitoring import pipeline_v2
+
+# 평상시(최초 수집이 아님) 계획 — _start_run이 돌려주는 모양.
+_PLAN = {"weeks": [(date(2026, 8, 10), date(2026, 8, 16))],
+         "run_period": (date(2026, 8, 10), date(2026, 8, 16)), "bootstrap": False}
 
 
 def _patch_all_stages(monkeypatch, calls, fail_at=None):
     def make_stage(name):
-        def stage(run_id):
+        def stage(run_id, weeks=None):
             calls.append((name, run_id))
             if name == fail_at:
                 raise RuntimeError(f"{name} 네트워크 오류(가정)")
@@ -15,7 +21,7 @@ def _patch_all_stages(monkeypatch, calls, fail_at=None):
 
         return stage
 
-    monkeypatch.setattr(pipeline_v2, "_start_run", lambda: 99)
+    monkeypatch.setattr(pipeline_v2, "_start_run", lambda: (99, _PLAN))
     monkeypatch.setattr(pipeline_v2, "_collect", make_stage("collect"))
     monkeypatch.setattr(pipeline_v2, "_merge_keywords", make_stage("merge_keywords"))
     finish_calls = []
@@ -60,9 +66,9 @@ def test_finish_run_reports_failure_with_correct_run_id(monkeypatch):
 
 
 def test_run_pipeline_returns_run_id_from_start_run(monkeypatch):
-    monkeypatch.setattr(pipeline_v2, "_start_run", lambda: 7)
-    monkeypatch.setattr(pipeline_v2, "_collect", lambda run_id: {"ok": True})
-    monkeypatch.setattr(pipeline_v2, "_merge_keywords", lambda run_id: {"ok": True})
+    monkeypatch.setattr(pipeline_v2, "_start_run", lambda: (7, _PLAN))
+    monkeypatch.setattr(pipeline_v2, "_collect", lambda run_id, weeks=None: {"ok": True})
+    monkeypatch.setattr(pipeline_v2, "_merge_keywords", lambda run_id, weeks=None: {"ok": True})
     monkeypatch.setattr(pipeline_v2, "_finish_run", lambda run_id, failed: None)
 
     report = pipeline_v2.run_pipeline()
@@ -74,8 +80,8 @@ def test_stage_returning_item_errors_is_counted_as_failed(monkeypatch):
     """2026-08-18 회귀 방지 — TAVILY_API_KEY 미설정처럼 한 건도 못 가져온
     경우에도 collect_all은 예외 없이 "error"만 담아 리턴한다. 그걸 실패로
     안 세면 빈 주가 completed로 조용히 마감된다(v3와 같은 사고)."""
-    monkeypatch.setattr(pipeline_v2, "_start_run", lambda: 99)
-    monkeypatch.setattr(pipeline_v2, "_collect", lambda run_id: {"results": [
+    monkeypatch.setattr(pipeline_v2, "_start_run", lambda: (99, _PLAN))
+    monkeypatch.setattr(pipeline_v2, "_collect", lambda run_id, weeks=None: {"results": [
         {"fixed_keyword": None, "fetched": 0, "inserted": 0, "error": "TAVILY_API_KEY 미설정 — .env 확인"},
     ]})
     monkeypatch.setattr(pipeline_v2, "_merge_keywords", lambda run_id: {"results": []})

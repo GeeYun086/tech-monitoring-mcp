@@ -32,6 +32,75 @@ def week_bounds_for(day: date) -> tuple[date, date]:
     return monday, monday + timedelta(days=6)
 
 
+def previous_week_bounds(today: date | None = None) -> tuple[date, date]:
+    """직전(완료된) 달력 주. 정기 수집이 매주 월요일에 걷는 범위다.
+
+    2026-08-19에 "이번 주"에서 여기로 옮겼다(담당자 결정). 이번 주를 걷으면
+    아직 끝나지 않은 주를 긁는 셈이라, 월·화에 돌리면 이틀치뿐이라 후보가
+    수십 건에 그쳤다(실측 2026-08-19: 52건). 라벨 30건을 모으기도 전에
+    바닥나서 소급 수집 스크립트로 메워야 했던 게 그 때문이다. 월요일에
+    직전 주를 걷으면 항상 완료된 7일치가 들어와 그 문제가 사라진다.
+    """
+    return week_bounds_for((today or date.today()) - timedelta(days=7))
+
+
+# 최초 1회 수집 범위: 이번 주 + 지난 2주. 라벨링을 시작하려면 후보가
+# 최소 수백 건은 있어야 하고(30건 이상 라벨해야 분류기 학습이 시작된다),
+# 주차가 여럿이어야 relevance_model.build_groups가 "주차 단위" 평가로
+# 전환돼 "지난주 라벨로 이번 주 기사를 맞히는가"를 잴 수 있다.
+BOOTSTRAP_WEEKS = 3
+
+_BOOTSTRAP_KEY = "bootstrap_completed_at"
+
+
+def is_bootstrapped(conn) -> bool:
+    """최초 수집을 이미 마쳤는가(008 pipeline_state)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT value FROM pipeline_state WHERE key = %s", (_BOOTSTRAP_KEY,))
+        return cur.fetchone() is not None
+
+
+def mark_bootstrapped(conn, today: date | None = None) -> None:
+    """최초 수집 완료 기록. **수집이 실제로 성공했을 때만** 부른다 —
+    실패했는데 표시해버리면 3주치를 영영 못 걷고 직전 주만 걷게 된다."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO pipeline_state (key, value) VALUES (%s, %s)
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+            """,
+            (_BOOTSTRAP_KEY, str(today or date.today())),
+        )
+
+
+def target_weeks(bootstrap: bool, today: date | None = None) -> list[tuple[date, date]]:
+    """이번 실행에서 수집할 달력 주 목록(오래된 주부터).
+
+    최초에는 이번 주를 **포함해** 3주 — 지금 당장 라벨링을 시작할 수 있어야
+    하므로 진행 중인 주라도 있는 만큼 걷는다. 그 뒤로는 완료된 직전 주 하나만
+    걷는다(previous_week_bounds 참고).
+    """
+    today = today or date.today()
+    if not bootstrap:
+        return [previous_week_bounds(today)]
+
+    this_monday, _end = week_bounds_for(today)
+    return [week_bounds_for(this_monday - timedelta(weeks=n))
+            for n in range(BOOTSTRAP_WEEKS - 1, -1, -1)]
+
+
+def plan_collection(conn, today: date | None = None) -> dict:
+    """이번 실행이 걷을 주차와, run에 기록할 기준 주를 함께 정한다.
+
+    기준 주(run_period)는 걷는 주차 중 **가장 최근 주**다 — 화면 배너의
+    "기준 기간"이 되고, 소급분이 섞이면 그 사실은 dashboard_queries.
+    get_pool_span이 따로 알려준다.
+    """
+    bootstrap = not is_bootstrapped(conn)
+    weeks = target_weeks(bootstrap, today)
+    return {"weeks": weeks, "run_period": weeks[-1], "bootstrap": bootstrap}
+
+
 def _current_week_bounds(today: date | None = None) -> tuple[date, date]:
     """이번 주 월~일 달력 주간.
 
@@ -46,9 +115,14 @@ def _current_week_bounds(today: date | None = None) -> tuple[date, date]:
     return week_bounds_for(today or date.today())
 
 
-def start_weekly_run(conn, today: date | None = None) -> int:
-    """이번 주 run을 시작(또는 같은 주 재실행 시 기존 run을 'running'으로 재개)한다."""
-    period_start, period_end = _current_week_bounds(today)
+def start_weekly_run(conn, today: date | None = None, period: tuple[date, date] | None = None) -> int:
+    """run을 시작(또는 같은 주 재실행 시 기존 run을 'running'으로 재개)한다.
+
+    period를 주면 그 주를 기준 주로 쓴다(plan_collection이 정한 값). 안 주면
+    예전대로 이번 주 — v3 파이프라인과 수집기 단독 실행(__main__)이 아직
+    그 경로를 쓴다.
+    """
+    period_start, period_end = period if period is not None else _current_week_bounds(today)
     with conn.cursor() as cur:
         cur.execute(
             """

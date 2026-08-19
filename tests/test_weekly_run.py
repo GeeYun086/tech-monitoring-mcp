@@ -135,3 +135,66 @@ def test_week_bounds_for_returns_monday_to_sunday():
 
 def test_week_bounds_for_is_stable_within_the_same_week():
     assert wr.week_bounds_for(date(2026, 8, 17)) == wr.week_bounds_for(date(2026, 8, 23))
+
+
+# ---- 수집 주기: 최초 3주치 → 이후 직전 주만 (2026-08-19 담당자 결정) ----
+
+def test_previous_week_bounds_returns_the_completed_week():
+    """월요일에 돌리면 방금 끝난 주를 걷어야 한다 — 진행 중인 주를 걷으면
+    월·화엔 이틀치뿐이라 라벨링 후보가 수십 건에 그친다(실측 52건)."""
+    # 2026-08-24는 월요일
+    assert wr.previous_week_bounds(date(2026, 8, 24)) == (date(2026, 8, 17), date(2026, 8, 23))
+
+
+def test_previous_week_is_stable_regardless_of_weekday_run():
+    """월요일에 못 돌려도 그 주 안에 돌리면 같은 주를 걷는다(수동 실행 대비)."""
+    assert wr.previous_week_bounds(date(2026, 8, 26)) == wr.previous_week_bounds(date(2026, 8, 24))
+
+
+def test_bootstrap_collects_three_weeks_including_this_one():
+    weeks = wr.target_weeks(bootstrap=True, today=date(2026, 8, 19))
+
+    assert weeks == [
+        (date(2026, 8, 3), date(2026, 8, 9)),
+        (date(2026, 8, 10), date(2026, 8, 16)),
+        (date(2026, 8, 17), date(2026, 8, 23)),   # 이번 주 포함
+    ]
+
+
+def test_regular_run_collects_only_the_previous_week():
+    assert wr.target_weeks(bootstrap=False, today=date(2026, 8, 24)) == [
+        (date(2026, 8, 17), date(2026, 8, 23)),
+    ]
+
+
+def test_run_period_is_the_most_recent_collected_week():
+    """화면 배너의 "기준 기간" — 소급분이 섞여도 기준은 가장 최근 주다."""
+    conn = _SpyConn(_SpyCursor(fetchone_result=None))   # 최초 기록 없음
+    plan = wr.plan_collection(conn, today=date(2026, 8, 19))
+
+    assert plan["bootstrap"] is True
+    assert plan["run_period"] == (date(2026, 8, 17), date(2026, 8, 23))
+    assert len(plan["weeks"]) == wr.BOOTSTRAP_WEEKS
+
+
+def test_plan_switches_to_single_week_once_bootstrapped():
+    """핵심 — 최초 수집을 마쳤다고 기록되면 그 뒤로는 직전 주만 걷는다
+    (매 실행마다 3주치를 다시 긁어 크레딧을 반복 소모하면 안 된다)."""
+    conn = _SpyConn(_SpyCursor(fetchone_result=("2026-08-19",)))   # 최초 수집 기록 있음
+
+    plan = wr.plan_collection(conn, today=date(2026, 8, 24))
+
+    assert plan["bootstrap"] is False
+    assert plan["weeks"] == [(date(2026, 8, 17), date(2026, 8, 23))]
+
+
+def test_start_weekly_run_uses_the_given_period():
+    """정기 수집은 직전 주를 기준 주로 기록해야 한다 — 안 그러면 배너 기간과
+    실제 수집 범위가 어긋난다."""
+    cursor = _SpyCursor(fetchone_result=(1,))
+    conn = _SpyConn(cursor)
+
+    wr.start_weekly_run(conn, period=(date(2026, 8, 17), date(2026, 8, 23)))
+
+    _query, params = cursor.executed[-1]
+    assert params[:2] == (date(2026, 8, 17), date(2026, 8, 23))

@@ -455,14 +455,20 @@ def collect_for_keyword(
     return {"fixed_keyword": keyword, "fetched": fetched, "inserted": inserted, "error": None}
 
 
-def collect_all(run_id: int) -> list[dict]:
-    """이번 주 공용 기사 풀을 만든다 — 화이트리스트 사이트마다 넓은 질의로
-    수집(006 헤더 참고).
+def collect_all(run_id: int, weeks: list[tuple[date, date]] | None = None) -> list[dict]:
+    """공용 기사 풀을 만든다 — 화이트리스트 사이트마다 넓은 질의로 수집
+    (006 헤더 참고).
 
     고정 키워드를 보지 않는다: 수집은 시장과 무관하고, 시장별 선별은 나중에
     분류기가 한다. 그래서 시장을 추가해도 재수집이 필요 없고 크레딧이 시장
     수와 무관하다. 다만 활성 키워드가 하나도 없으면 수집해도 볼 화면이 없어
-    그대로 알린다(라벨링·판단이 전부 시장 단위라서)."""
+    그대로 알린다(라벨링·판단이 전부 시장 단위라서).
+
+    weeks를 주면 그 달력 주들을 **주차별로 따로** 호출한다(최초 3주치 수집).
+    한 번에 3주 범위로 요청하지 않는 이유: Tavily는 페이지네이션이 없고 한
+    호출당 최대 RESULTS_PER_SITE건이라, 넓게 잡으면 3주치가 20건으로 눌린다.
+    주차별로 나누면 주당 20건씩 확보된다. 안 주면 run의 기준 주 하나만 걷는다.
+    """
     if not settings.tavily_api_key:
         return [{"source": None, "fetched": 0, "inserted": 0, "error": "TAVILY_API_KEY 미설정 — .env 확인"}]
 
@@ -470,9 +476,11 @@ def collect_all(run_id: int) -> list[dict]:
     try:
         if not get_active_fixed_keywords(conn):
             return [{"source": None, "fetched": 0, "inserted": 0, "error": "fixed_keywords에 활성 키워드 없음"}]
-        start_date, end_date = get_run_period(conn, run_id)
+        if weeks is None:
+            weeks = [get_run_period(conn, run_id)]
         return [
             collect_pool_for_site(conn, run_id, domain, start_date, end_date)
+            for start_date, end_date in weeks
             for domain in SITE_DOMAINS
         ]
     finally:

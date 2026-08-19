@@ -44,6 +44,8 @@ from tech_monitoring.db.connection import get_connection
 from tech_monitoring.db.weekly_run import (
     complete_weekly_run,
     fail_weekly_run,
+    mark_bootstrapped,
+    plan_collection,
     reset_weekly_data,
     start_weekly_run,
 )
@@ -52,11 +54,25 @@ from tech_monitoring.pipeline_report import stage_errors
 logger = logging.getLogger("tech_monitoring.pipeline_v2")
 
 
-def _start_run() -> int:
+def _start_run() -> tuple[int, dict]:
+    """수집 계획을 먼저 정하고 run을 연다.
+
+    계획을 wipe 전에 읽는 게 중요하다 — 최초 여부(pipeline_state)는 wipe
+    대상이 아니지만, 순서를 뒤집으면 나중에 다른 상태를 볼 때 실수하기 쉽다.
+    """
     conn = get_connection()
     try:
+        plan = plan_collection(conn)
         reset_weekly_data(conn)
-        return start_weekly_run(conn)
+        return start_weekly_run(conn, period=plan["run_period"]), plan
+    finally:
+        conn.close()
+
+
+def _mark_bootstrapped() -> None:
+    conn = get_connection()
+    try:
+        mark_bootstrapped(conn)
     finally:
         conn.close()
 
@@ -72,8 +88,8 @@ def _finish_run(run_id: int, failed: list[str]) -> None:
         conn.close()
 
 
-def _collect(run_id: int) -> dict:
-    return {"results": collect_all(run_id)}
+def _collect(run_id: int, weeks=None) -> dict:
+    return {"results": collect_all(run_id, weeks)}
 
 
 def _judge_relevance(run_id: int) -> dict:
@@ -98,24 +114,29 @@ def _merge_keywords(run_id: int) -> dict:
         conn.close()
 
 
-def _stages(run_id: int) -> list[tuple[str, object]]:
+def _stages(run_id: int, weeks=None) -> list[tuple[str, object]]:
     # 매 호출 시점에 run_id를 바인딩 — 테스트에서 monkeypatch로 _collect/
     # _merge_keywords 자체를 갈아끼울 수 있게 모듈 함수를 참조 형태로 감싼다
     # (v1 pipeline.py와 동일 패턴).
     return [
-        ("collect", lambda: _collect(run_id)),
+        ("collect", lambda: _collect(run_id, weeks)),
         ("judge_relevance", lambda: _judge_relevance(run_id)),
         ("merge_keywords", lambda: _merge_keywords(run_id)),
     ]
 
 
 def run_pipeline() -> dict:
-    run_id = _start_run()
+    run_id, plan = _start_run()
+    logger.info(
+        "수집 대상 %s: %s",
+        "3주치(최초 1회)" if plan["bootstrap"] else "직전 주",
+        ", ".join(f"{s}~{e}" for s, e in plan["weeks"]),
+    )
 
     results: dict[str, dict] = {}
     failed: list[str] = []
 
-    for name, fn in _stages(run_id):
+    for name, fn in _stages(run_id, plan["weeks"]):
         started = time.monotonic()
         try:
             result = fn()
@@ -139,9 +160,17 @@ def run_pipeline() -> dict:
         else:
             logger.info("%s ok (%.1fs): %s", name, time.monotonic() - started, result)
 
+    # 최초 수집을 마쳤다고 표시하는 건 **실제로 성공했을 때만** — 실패했는데
+    # 표시하면 다음부터 직전 주만 걷어 3주치를 영영 못 채운다.
+    if plan["bootstrap"] and "collect" not in failed:
+        _mark_bootstrapped()
+        logger.info("최초 3주치 수집 완료 — 다음부터는 직전 주만 걷습니다.")
+
     _finish_run(run_id, failed)
 
-    return {"run_id": run_id, "stages": results, "failed": failed}
+    return {"run_id": run_id, "stages": results, "failed": failed,
+            "bootstrap": plan["bootstrap"],
+            "weeks": [(str(s), str(e)) for s, e in plan["weeks"]]}
 
 
 if __name__ == "__main__":
