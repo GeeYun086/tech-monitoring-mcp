@@ -21,6 +21,12 @@ truncate_summary()로 짧게 잘라 UI가 항상 짧은 요약만 받게 한다(
 크레딧 복구 후 붙일지, 별도 번역 서비스를 쓸지는 아직 미정 — 담당자 확인 필요.
 """
 
+from datetime import timedelta
+
+# labeling에서 UNDATED("발행일 없음" 버킷)를 가져온다 — 라벨링 화면과 기사
+# 목록이 같은 주차 버킷 개념을 써야 한다. labeling은 이 모듈을 import하지
+# 않으므로 순환 참조가 아니다.
+from tech_monitoring import labeling
 from tech_monitoring.utils.text import strip_article_boilerplate
 
 _SUMMARY_MAX_CHARS = 150
@@ -119,6 +125,42 @@ def get_search_results(conn, run_id: int, fixed_keyword_id: int, limit: int | No
         return _apply_summary_truncation([dict(zip(columns, row)) for row in cur.fetchall()])
 
 
+def get_pool_weeks(conn, run_id: int) -> list[dict]:
+    """이 run 기사 풀에 들어있는 발행 주 목록(최근 주부터) + 각 건수.
+
+    소급 수집(작업 4) 이후 한 run에 여러 주가 섞여 있어서, 화면이 "어느 주를
+    볼지" 고를 수 있어야 한다. 발행일이 없는 기사는 마지막에 별도 버킷으로
+    돌려준다(week_start=None) — 건수가 0이 아니면 화면에도 "날짜 미상"으로
+    보여줘야 한다. 안 보여주면 그 기사들은 어느 주를 골라도 안 나와서
+    영구히 라벨링 대상에서 빠진다.
+
+    date_trunc('week')는 Postgres에서도 월요일 시작이라
+    db/weekly_run.week_bounds_for와 같은 기준이다."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT date_trunc('week', published_at)::date AS week_start, count(*) AS total
+            FROM collected_articles
+            WHERE run_id = %s AND published_at IS NOT NULL
+            GROUP BY 1
+            ORDER BY 1 DESC
+            """,
+            (run_id,),
+        )
+        weeks = [{"week_start": row[0], "total": row[1]} for row in cur.fetchall()]
+
+        cur.execute(
+            "SELECT count(*) FROM collected_articles "
+            "WHERE run_id = %s AND published_at IS NULL",
+            (run_id,),
+        )
+        undated = cur.fetchone()[0]
+
+    if undated:
+        weeks.append({"week_start": None, "total": undated})
+    return weeks
+
+
 def get_pool_span(conn, run_id: int) -> dict:
     """이 run 기사 풀의 발행일 범위와 건수.
 
@@ -136,8 +178,26 @@ def get_pool_span(conn, run_id: int) -> dict:
     return {"oldest": oldest, "newest": newest, "total": total}
 
 
+def _week_filter(week_start, alias: str = "") -> tuple[str, list]:
+    """발행 주 필터 조각 (SQL, params). week_start가 None이면 전체다.
+
+    UNDATED(발행일 없음)를 IS NULL로 따로 다루는 이유: 그 기사들은 어느 주에도
+    안 속해서, 주차 필터를 넣는 순간 화면에서 통째로 사라진다(라벨링 대상에서도
+    영구히 빠진다). 그래서 "날짜 미상"을 고를 수 있게 남겨둔다."""
+    column = f"{alias}published_at" if alias else "published_at"
+    if week_start is None:
+        return "", []
+    if week_start == labeling.UNDATED:
+        return f" AND {column} IS NULL", []
+    return (
+        f" AND {column} >= %s AND {column} < %s",
+        [week_start, week_start + timedelta(days=7)],
+    )
+
+
 def get_pool_articles(
     conn, run_id: int, fixed_keyword_id: int | None = None, limit: int | None = None,
+    week_start=None,
 ) -> list[dict]:
     """이번 주 공용 기사 풀(006부터 화면이 보여줄 목록).
 
@@ -148,26 +208,31 @@ def get_pool_articles(
 
     **잘라내지 않는다.** 점수가 낮아도 목록에 남는다 — 분류기가 틀려도 기사가
     사라지면 안 되고("Gemini가 막히면 그 주 0건"과 같은 사고), 라벨링에는
-    도움 안 되는 기사도 필요하다. 순위만 바꾸는 게 이 설계의 핵심이다."""
+    도움 안 되는 기사도 필요하다. 순위만 바꾸는 게 이 설계의 핵심이다.
+
+    week_start를 주면 그 발행 주만 본다(소급 수집으로 한 run에 여러 주가 섞여
+    있다 — get_pool_weeks로 목록을 얻는다)."""
     if fixed_keyword_id is None:
+        where, week_params = _week_filter(week_start)
         query = (
             "SELECT title, url, snippet, source_domain, published_at, source_name, "
             "NULL::real AS score "
-            "FROM collected_articles WHERE run_id = %s "
+            "FROM collected_articles WHERE run_id = %s" + where + " "
             "ORDER BY published_at DESC NULLS LAST"
         )
-        params: list = [run_id]
+        params: list = [run_id, *week_params]
     else:
+        where, week_params = _week_filter(week_start, alias="ca.")
         query = (
             "SELECT ca.title, ca.url, ca.snippet, ca.source_domain, ca.published_at, "
             "ca.source_name, r.score "
             "FROM collected_articles ca "
             "LEFT JOIN article_keyword_relevance r "
             "  ON r.article_id = ca.id AND r.fixed_keyword_id = %s "
-            "WHERE ca.run_id = %s "
+            "WHERE ca.run_id = %s" + where + " "
             "ORDER BY r.score DESC NULLS LAST, ca.published_at DESC NULLS LAST"
         )
-        params = [fixed_keyword_id, run_id]
+        params = [fixed_keyword_id, run_id, *week_params]
     if limit is not None:
         query += " LIMIT %s"
         params.append(limit)
@@ -179,6 +244,7 @@ def get_pool_articles(
 
 def get_pool_articles_for_variants(
     conn, run_id: int, variant_phrases: list[str], limit: int | None = None,
+    week_start=None,
 ) -> list[dict]:
     """공용 풀에서 특정 키워드(동의어 그룹) 언급 기사만 — 문자열 포함 검사다.
 
@@ -188,13 +254,14 @@ def get_pool_articles_for_variants(
     if not variant_phrases:
         return []
     patterns = [f"%{v}%" for v in variant_phrases]
+    where, week_params = _week_filter(week_start)
     query = (
         "SELECT title, url, snippet, source_domain, published_at, source_name "
         "FROM collected_articles WHERE run_id = %s "
-        "AND (title ILIKE ANY(%s) OR snippet ILIKE ANY(%s)) "
+        "AND (title ILIKE ANY(%s) OR snippet ILIKE ANY(%s))" + where + " "
         "ORDER BY published_at DESC NULLS LAST"
     )
-    params: list = [run_id, patterns, patterns]
+    params: list = [run_id, patterns, patterns, *week_params]
     if limit is not None:
         query += " LIMIT %s"
         params.append(limit)
