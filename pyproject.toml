@@ -17,6 +17,10 @@ dependencies = [
     "scikit-learn>=1.5",
     "numpy>=1.26",
     "joblib>=1.4",
+    # Claude가 수집 결과를 직접 조회하는 MCP 서버(src/tech_monitoring/mcp_server).
+    # 읽기 전용이라 ML 라이브러리는 필요 없다 — 분류기 판단은 파이프라인이 미리
+    # 끝내 article_keyword_relevance.score에 저장해둔다.
+    "mcp>=1.2",
     # 다국어 문장 임베딩 방식용. torch를 끌고 와 무겁기 때문에 선택 설치로
     # 두고, 없으면 문자 n-gram TF-IDF 방식만 채점된다.
     # ./.venv/Scripts/python.exe -m pip install -e ".[embedding]"

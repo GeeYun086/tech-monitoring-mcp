@@ -101,26 +101,31 @@ pg_dump -t article_labels --data-only <옛DB> | psql <공용Supabase>
 가장 빠르다. **DB(Supabase)가 이미 클라우드에 있으므로 누른 라벨은 곧바로
 같은 DB에 쌓인다** — 담당자 쪽에 설치할 것이 없다.
 
-### 사람마다 앱을 따로 배포한다 (코드 수정 없음)
+### 앱 하나를 함께 쓴다 — 팀 공용 라벨 풀 (2026-08-19 결정)
 
-같은 저장소로 Streamlit Cloud 앱을 여러 개 만들고, 앱마다 secrets의
-`LABELED_BY`만 다르게 준다. 라벨의 유일성 키가
-`(url_norm, fixed_keyword_id, labeled_by)`라(005) 서로 덮어쓰지 않는다.
-
-| 앱 | secrets |
-| --- | --- |
-| tech-monitoring-**geeyun** | `LABELED_BY = "geeyun"` |
-| tech-monitoring-**manager** | `LABELED_BY = "manager"` |
-
-앱 하나를 여럿이 같이 쓰면 안 된다 — Streamlit은 프로세스 하나로 모든 접속을
-처리해서 `LABELED_BY`도 하나뿐이라, 접속자 전원이 같은 사람으로 저장된다.
+앱 하나를 배포하고 링크를 공유한다. secrets의 `LABELED_BY`를 `team` 같은
+**공용 값 하나**로 두면 누가 누르든 같은 라벨 풀에 쌓인다 — 지금은 통합 모델
+(전체 라벨로 하나를 학습)이라 이 편이 일관된다. 코드 수정도 필요 없다.
 
 배포 설정:
 - Main file path: `app/streamlit_app.py`
 - Python: 3.12 (`pyproject.toml`의 `requires-python`)
-- Secrets: `DATABASE_URL`(필수), `LABELED_BY`(필수). `TAVILY_API_KEY`는
+- Secrets: `DATABASE_URL`(필수), `LABELED_BY = "team"`. `TAVILY_API_KEY`는
   **넣지 않는 걸 권장** — 대시보드의 "직접 검색"이 실시간 API를 호출해
   크레딧을 쓴다. 없으면 그 칸만 안내 문구가 뜨고 라벨링은 정상 동작한다.
+- 무료 앱은 링크를 아는 누구나 들어오고 DB에 쓸 수 있다. 비공개(이메일 초대)
+  설정을 쓰거나 링크를 사내에만 공유할 것.
+
+**대신 감수하는 것**: 같은 기사·같은 시장을 두 사람이 다르게 누르면 나중 것이
+앞 것을 조용히 덮어쓴다(`save_label`이 ON CONFLICT DO UPDATE라 에러가 안 난다).
+누가 눌렀는지도 남지 않으므로 **이 방식으로 쌓은 라벨은 나중에 사람별로 나눌 수
+없다** — 개인 모델로 바꾸더라도 그때부터 쌓는 라벨만 분리된다. 라벨을 빨리
+모으는 게 우선이라 이 손실을 받아들인 것이다.
+
+나중에 사람별로 나누려면 화면에 "지금 라벨링하는 사람" 선택을 붙이고
+(`labeling`의 모든 함수가 이미 `labeled_by` 인자를 받는다) 앱마다 다른
+`LABELED_BY`를 주는 대신 세션에서 정하게 하면 된다. 앱을 사람 수만큼 배포하는
+방법도 있지만 쓰는 사람이 늘 때마다 앱을 만들어야 해서 운영 방식으로 맞지 않는다.
 
 ### torch를 넣지 않는다
 
@@ -154,6 +159,44 @@ TF-IDF는 찍기 기준선을 못 넘어(정확도 0.550 vs 0.567) `build_model`
 어느 쪽이 맞는지는 감으로 정하지 않는다 — 같은 `(url_norm, fixed_keyword_id)`에
 사람마다 다른 label이 남으면 그게 곧 "팀 기준이 얼마나 다른가"이고, 이 불일치가
 낮으면 통합, 높으면 개인이 맞다는 근거가 된다(005 헤더 참고).
+
+## MCP 서버 — Claude가 수집 결과를 직접 조회
+
+```bash
+./.venv/Scripts/python.exe -m tech_monitoring.mcp_server
+```
+
+**읽기 전용이다.** 수집·라벨링·학습은 파이프라인과 대시보드가 하고, 여기서는
+이미 DB에 있는 결과를 꺼내 보여주기만 한다. 그래서 이 서버에는 머신러닝
+라이브러리가 필요 없다 — 분류기 판단은 파이프라인이 미리 끝내
+`article_keyword_relevance.score`에 저장해두기 때문이다(psycopg만 있으면 된다).
+
+| 도구 | 하는 일 |
+| --- | --- |
+| `get_status` | 기준 기간·기사 수·주차별 건수·시장 목록·라벨 현황(+파이프라인 실패 사유) |
+| `get_markets` | 시장 목록과 시장별 라벨 진행 상황 |
+| `get_articles(market, limit)` | 한 시장의 기사 — **분류기 점수순**, 모델이 없으면 최신순 |
+| `get_keywords(market, limit)` | 한 시장의 주요 키워드(보조 지표) |
+
+응답에 **순서의 근거**(`ordering`)와 **전체 건수**(`total`)를 함께 담는다 —
+모델이 없어 최신순인 걸 모르면 추천 순위로 오해하고, 응답 길이 때문에 자른
+것을 "이게 전부"로 읽는다. 모르는 시장 이름을 물으면 빈 결과 대신 등록된
+시장 목록을 돌려준다.
+
+저장소 루트의 `.mcp.json`에 이미 설정돼 있어 Claude Code에서는 그대로 잡힌다.
+Claude Desktop 등 다른 클라이언트는 아래처럼 등록한다(`DATABASE_URL`은 `.env`
+에서 읽으므로 보통 `env`를 따로 줄 필요가 없다).
+
+```json
+{
+  "mcpServers": {
+    "tech-monitoring": {
+      "command": "<프로젝트>/.venv/Scripts/python.exe",
+      "args": ["-m", "tech_monitoring.mcp_server"]
+    }
+  }
+}
+```
 
 ## 고정 키워드(모니터링 대상 시장) 설정
 
