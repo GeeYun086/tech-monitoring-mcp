@@ -18,6 +18,11 @@ _COLS_BY_TABLE = {
 }
 
 
+# 판정 우선순위 — 서브쿼리에 딸려 나오는 이름보다 바깥 FROM이 먼저 잡히게.
+_TABLE_PRIORITY = ("collected_articles", "search_results", "market_keywords",
+                   "weekly_runs", "fixed_keywords")
+
+
 def _sort_by_published_at_desc_nulls_last(rows: list[dict]) -> list[dict]:
     dated = sorted((r for r in rows if r.get("published_at") is not None), key=lambda r: r["published_at"], reverse=True)
     undated = [r for r in rows if r.get("published_at") is None]
@@ -37,7 +42,10 @@ class _FakeCursor:
         return False
 
     def execute(self, query, params=()):
-        table = next(name for name in _COLS_BY_TABLE if f"FROM {name}" in query)
+        # 주 테이블 판정. collected_articles 질의는 키워드 적중을 세려고
+        # 서브쿼리에서 fixed_keywords를 읽으므로(2026-08-19), 사전 순으로 먼저
+        # 걸리는 이름을 쓰면 엉뚱한 테이블로 잡힌다. 기사 테이블을 먼저 본다.
+        table = next(name for name in _TABLE_PRIORITY if f"FROM {name}" in query)
         cols = _COLS_BY_TABLE[table]
         self.description = [type("Col", (), {"name": n})() for n in cols]
 
@@ -65,7 +73,10 @@ class _FakeCursor:
             self.description = [type("Col", (), {"name": n})() for n in ("week_start", "total")]
             self._rows = sorted(counts.items(), reverse=True)
             return
-        elif "published_at IS NULL" in query and "count(*)" in query:
+        elif query.strip().startswith("SELECT count(*)") and "published_at IS NULL" in query:
+            # 기사 목록 질의도 키워드 적중을 세느라 count(*)를 쓰고, 날짜 미상
+            # 필터에는 published_at IS NULL이 들어간다 — 둘을 구분하려면
+            # "질의가 count(*)로 시작하는가"(주차 집계 전용)를 봐야 한다.
             (run_id,) = params
             undated = [r for r in self._tables.get("collected_articles", [])
                        if r["run_id"] == run_id and r.get("published_at") is None]
@@ -79,7 +90,7 @@ class _FakeCursor:
             else:
                 fixed_keyword_id, (run_id, *rest) = None, params
             rows = [r for r in self._tables.get("collected_articles", []) if r["run_id"] == run_id]
-            if "ILIKE" in query:
+            if "ILIKE ANY" in query:
                 patterns, _patterns2, *rest = rest
                 needles = [p.strip("%") for p in patterns]
                 rows = [
@@ -461,3 +472,24 @@ def test_get_pool_articles_can_show_only_undated():
     result = dq.get_pool_articles(conn, run_id=1, fixed_keyword_id=1, week_start=labeling.UNDATED)
 
     assert [r["title"] for r in result] == ["날짜 없음"]
+
+
+# ---- 정렬 근거 (2026-08-19, 키워드 임시 정렬 도입) ----
+
+def test_ordering_says_classifier_when_scores_exist():
+    articles = [{"score": 0.9}, {"score": 0.1}]
+
+    assert "분류기" in dq.describe_ordering(articles)
+
+
+def test_ordering_falls_back_to_recency_without_a_model():
+    articles = [{"score": None}, {"score": None}]
+
+    assert "최신순" in dq.describe_ordering(articles)
+
+
+def test_ordering_says_classifier_if_any_article_is_scored():
+    """일부만 채점된 상태에서도 근거는 분류기다 — 점수가 앞서 정렬되므로."""
+    articles = [{"score": None}, {"score": 0.7}]
+
+    assert "분류기" in dq.describe_ordering(articles)

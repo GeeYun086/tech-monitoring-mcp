@@ -84,8 +84,9 @@ def get_markets(conn) -> list[dict]:
 
 
 def get_articles(conn, market: str, limit: int = DEFAULT_ARTICLE_LIMIT) -> dict:
-    """한 시장의 주간 기사. **분류기 점수 내림차순**이고 점수가 없으면 최신순이다
-    (dashboard_queries.get_pool_articles가 그 규칙을 갖고 있어 그대로 쓴다).
+    """한 시장의 주간 기사. 분류기 점수 내림차순이고, 아직 학습된 모델이 없으면
+    최신순이다. 정렬 근거는 응답의 ordering에 담기며 판정은 dashboard_queries가
+    한다 — 화면과 항상 같은 순서·같은 설명이 되도록.
 
     점수로 자르지 않고 정렬만 한다는 원칙(007)은 여기서도 같다 — 다만 응답
     길이 때문에 상위 limit건만 내보내므로, 전체 건수를 함께 알려 잘렸다는 걸
@@ -101,16 +102,15 @@ def get_articles(conn, market: str, limit: int = DEFAULT_ARTICLE_LIMIT) -> dict:
 
     limit = max(1, min(int(limit), MAX_ARTICLE_LIMIT))
     rows = dq.get_pool_articles(conn, run["id"], keyword["id"])
-    scored = any(r.get("score") is not None for r in rows)
 
     return {
         "market": keyword["keyword"],
         "period": f"{run['period_start']} ~ {run['period_end']}",
         "total": len(rows),
         "returned": min(limit, len(rows)),
-        # 순서의 근거를 밝힌다 — 라벨이 부족해 모델이 없으면 최신순인데, 그걸
-        # 모르면 "추천 순서"로 오해한다.
-        "ordering": "분류기 점수 높은 순" if scored else "최신순(아직 학습된 모델이 없음)",
+        # 순서의 근거를 밝힌다 — 임시 정렬 중인 걸 모르면 "추천 순위"로
+        # 오해한다. 판정은 dashboard_queries가 한다(화면과 같은 문장을 쓰려고).
+        "ordering": dq.describe_ordering(rows),
         "articles": [
             {
                 "title": r["title"],

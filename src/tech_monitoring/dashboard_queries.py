@@ -195,6 +195,20 @@ def _week_filter(week_start, alias: str = "") -> tuple[str, list]:
     )
 
 
+def describe_ordering(articles: list[dict]) -> str:
+    """이 목록이 **무엇을 근거로** 정렬됐는지 한 줄로 설명한다.
+
+    화면과 MCP가 각자 판단하면 같은 목록을 다르게 설명하게 된다(실제로 MCP만
+    "최신순"이라고 말하던 시기가 있었다). 근거 판정은 여기 한 곳에서만 한다.
+
+    순서를 밝히는 게 중요한 이유: 모델이 없어 임시 정렬 중인데 그걸 모르면
+    사람도 Claude도 "추천 순위"로 읽는다.
+    """
+    if any(a.get("score") is not None for a in articles):
+        return "분류기 점수 높은 순(사람이 매긴 라벨로 학습)"
+    return "최신순(아직 학습된 모델이 없음)"
+
+
 def get_pool_articles(
     conn, run_id: int, fixed_keyword_id: int | None = None, limit: int | None = None,
     week_start=None,
@@ -211,7 +225,18 @@ def get_pool_articles(
     도움 안 되는 기사도 필요하다. 순위만 바꾸는 게 이 설계의 핵심이다.
 
     week_start를 주면 그 발행 주만 본다(소급 수집으로 한 run에 여러 주가 섞여
-    있다 — get_pool_weeks로 목록을 얻는다)."""
+    있다 — get_pool_weeks로 목록을 얻는다).
+
+    **모델이 없는 첫 주에 시장 키워드로 임시 정렬하는 안을 검토했다가 접었다**
+    (2026-08-19). fixed_keywords.search_terms_ko/en으로 제목·요약을 매칭해봤더니
+    100건 중 적중이 에이전트 도입 9건, 교육 2건, 비즈니스 실적 **0건**이었다 —
+    등록된 검색어가 "AI 기업 실적"처럼 긴 구라서 기사 본문에 통째로 나오는
+    일이 거의 없다. 짧은 단어로 바꾸면 걸리긴 하지만, 그 목록은 수집 검색어와
+    같은 값이라 짧게 만들면 수집 노이즈가 늘어난다(003의 실패 기록). 정렬용
+    목록을 따로 두는 방법도 있었으나, 담당자가 **라벨 기반 순위 하나로만
+    가기로 결정**했다 — 사람이 매긴 판단이 쌓일수록 순위가 정확해지는 구조가
+    더 단순하고, 여러 사람이 라벨링에 참여하면 그 자체로 선별이 개선된다.
+    """
     if fixed_keyword_id is None:
         where, week_params = _week_filter(week_start)
         query = (

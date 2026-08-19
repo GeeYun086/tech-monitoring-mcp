@@ -24,7 +24,8 @@
          수집분 전체를 보여준다(2026-08-13 담당자 확인 — 나중에 라벨링
          작업에 쓸 예정이라 넉넉하게). 기사 풀은 시장과 무관한 하나이고
          (006), **정렬만** 시장별 분류기 점수로 달라진다(007) — 점수가 낮은
-         기사도 목록에 남는다. 아직 모델이 없으면 최신순이다.
+         기사도 목록에 남는다. 아직 모델이 없으면 최신순이고, 무엇으로
+         정렬됐는지 목록 위에 표시한다.
        - 이번 주 주요 키워드는 접힌 expander(보조 지표)로 축소했다 —
          대문자 시작 휴리스틱이라 완벽하지 않고(US·Security 같은 애매한
          것도 섞임), 담당자가 "기사를 제대로 보여주는 쪽"에 무게를 두기로
@@ -528,7 +529,7 @@ def _render_keyword_tab(conn, run_id: int, fixed_keyword: dict) -> None:
             conn, run_id, variant_phrases, week_start=week_start,
         )
 
-    st.caption(f"{len(articles)}건")
+    st.caption(f"{len(articles)}건 · 정렬: {dq.describe_ordering(articles)}")
     _render_article_list(articles)
 
 
