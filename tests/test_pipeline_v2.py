@@ -92,3 +92,33 @@ def test_stage_returning_item_errors_is_counted_as_failed(monkeypatch):
 
     assert report["failed"] == ["collect"]
     assert finish_calls == [(99, ["collect"])]
+
+
+def test_report_marks_failure_so_ci_can_see_it(monkeypatch):
+    """자동 실행(GitHub Actions)은 로그를 사람이 안 보므로 종료 코드가 유일한
+    신호다(작업 9). __main__이 report["failed"]로 종료 코드를 정하므로, 실패가
+    거기에 남는지가 곧 "CI가 빨간불이 되는가"다."""
+    monkeypatch.setattr(pipeline_v2, "_start_run", lambda: (99, _PLAN))
+    monkeypatch.setattr(pipeline_v2, "_collect", lambda run_id, weeks=None: {"results": [
+        {"source": "AI타임스", "fetched": 0, "inserted": 0, "error": "ReadTimeout"},
+    ]})
+    monkeypatch.setattr(pipeline_v2, "_judge_relevance", lambda run_id: {"results": []})
+    monkeypatch.setattr(pipeline_v2, "_merge_keywords", lambda run_id: {"results": []})
+    monkeypatch.setattr(pipeline_v2, "_finish_run", lambda run_id, failed: None)
+
+    assert pipeline_v2.run_pipeline()["failed"] == ["collect"]
+
+
+def test_clean_run_reports_no_failure(monkeypatch):
+    """오탐 방지 — 정상 주에 CI가 빨간불이면 아무도 안 본다."""
+    monkeypatch.setattr(pipeline_v2, "_start_run", lambda: (99, _PLAN))
+    monkeypatch.setattr(pipeline_v2, "_collect", lambda run_id, weeks=None: {"results": [
+        {"source": "AI타임스", "fetched": 12, "inserted": 12, "error": None},
+    ]})
+    monkeypatch.setattr(pipeline_v2, "_judge_relevance", lambda run_id: {"results": [
+        {"fixed_keyword": "교육", "judged": 12, "relevant": 5, "error": None},
+    ]})
+    monkeypatch.setattr(pipeline_v2, "_merge_keywords", lambda run_id: {"results": []})
+    monkeypatch.setattr(pipeline_v2, "_finish_run", lambda run_id, failed: None)
+
+    assert pipeline_v2.run_pipeline()["failed"] == []

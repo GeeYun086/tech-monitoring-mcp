@@ -181,3 +181,8 @@ if __name__ == "__main__":
     else:
         logger.info("파이프라인 전체 성공 (run_id=%s)", report["run_id"])
     print(report)
+    # 실패를 종료 코드로도 알린다(2026-08-19, 작업 9). 자동 실행(GitHub Actions)은
+    # 로그를 사람이 안 보므로 종료 코드가 유일한 신호다 — 0으로 끝나면 수집이
+    # 통째로 실패한 주도 초록불로 지나간다. weekly_runs.status와 대시보드 배너에
+    # 이미 실패가 남지만, 그건 누가 열어봐야 보인다.
+    raise SystemExit(1 if report["failed"] else 0)

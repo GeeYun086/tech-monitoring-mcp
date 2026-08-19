@@ -1,0 +1,73 @@
+# 매주 월요일 자동 수집(2026-08-19, 작업 9).
+#
+# 파이프라인은 "완료된 직전 주"를 걷도록 돼 있으므로(db/weekly_run.
+# previous_week_bounds) 월요일에 돌리면 방금 끝난 한 주가 온전히 들어온다.
+# 주 1회 몇 분짜리 배치라 서버를 띄워둘 이유가 없어 GitHub Actions로 돌린다.
+#
+# **실행 시각이 왜 01:00 UTC인가**: 러너의 시계는 UTC이고 파이프라인은
+# date.today()로 주를 계산한다. 한국 시간 기준으로 잡으면(예: 월요일 08:00 KST
+# = 일요일 23:00 UTC) 러너에서는 아직 **일요일**이라 직전 주가 한 주 더 과거로
+# 밀린다. 01:00 UTC(=10:00 KST)면 UTC·KST 양쪽 모두 월요일이라 안전하다.
+# GitHub의 스케줄은 부하에 따라 수십 분 밀릴 수 있는데, 그래도 월요일 안이다.
+
+name: 주간 수집
+
+on:
+  schedule:
+    - cron: "0 1 * * 1"    # 매주 월요일 01:00 UTC = 10:00 KST
+  workflow_dispatch:        # 필요할 때 수동 실행(첫 검증에도 이걸 쓴다)
+
+# 앞선 실행이 아직 돌고 있으면 겹치지 않게 한다 — 파이프라인이 시작할 때
+# TRUNCATE로 지난주 데이터를 비우므로, 둘이 겹치면 한쪽이 다른 쪽의 수집분을
+# 지운다(pipeline_v2 모듈 docstring의 wipe 원칙 참고).
+concurrency:
+  group: weekly-collect
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45     # 임베딩 모델 최초 다운로드까지 감안
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # [embedding]까지 설치한다. 개발 PC와 같은 조건으로 채점해야 매주 같은
+      # 방식이 선택된다 — 빼면 임베딩이 후보에서 빠져(ImportError로 건너뜀)
+      # TF-IDF만 남고, 그게 찍기 기준선을 못 넘으면 그 주는 점수가 아예 없어
+      # 화면이 최신순으로 돌아간다(실측 2026-08-19: TF-IDF 0.550 < 찍기 0.567).
+      - name: 의존성 설치
+        run: pip install -e ".[embedding]"
+
+      # 다국어 임베딩 모델(약 458MB)을 매주 다시 받지 않도록 캐시한다.
+      # 모델 이름이 바뀌면 키가 달라져 자동으로 새로 받는다.
+      - name: 임베딩 모델 캐시
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-paraphrase-multilingual-MiniLM-L12-v2
+
+      # 스키마가 이미 최신이면 전부 "already applied"로 건너뛴다. 넣어두는
+      # 이유는 새 마이그레이션을 머지한 주에 사람이 적용을 잊어도 자동 실행이
+      # 먼저 깨지지 않게 하기 위해서다.
+      - name: 마이그레이션 적용
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m tech_monitoring.db.migrate
+
+      # 실패하면 종료 코드 1로 끝나 이 잡이 빨간불이 된다(pipeline_v2의
+      # __main__ 참고) — 자동 실행은 로그를 사람이 안 보므로 종료 코드가
+      # 유일한 신호다. 항목 하나라도 error면 실패로 센다.
+      - name: 주간 수집 실행
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          # 동의어 병합에만 쓴다. 없거나 크레딧이 떨어져도 파이프라인은
+          # 죽지 않고 "전부 단독 그룹"으로 폴백한다(analysis/keyword_merge.py).
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python -m tech_monitoring.pipeline_v2
