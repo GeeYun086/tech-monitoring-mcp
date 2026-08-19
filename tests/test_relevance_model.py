@@ -257,3 +257,50 @@ def test_evaluate_includes_per_market_breakdown():
     markets = {r["fixed_keyword"] for r in result["per_market"]}
     assert markets == {"교육", "비즈니스 실적"}
     assert sum(r["n_labels"] for r in result["per_market"]) == result["n_labels"]
+
+
+# --- 작업 6: 파일 없이 라벨에서 바로 모델 만들기 ---------------------------
+
+def test_build_model_trains_straight_from_labels(tmp_path, monkeypatch):
+    """모델 파일이 없어도 동작해야 한다 — 배포 환경의 파일시스템은 재시작하면
+    초기화되므로, 저장해둔 모델에 의존하면 화면이 조용히 "모델 없음"으로
+    돌아간다. 라벨이 원본이다."""
+    monkeypatch.setattr(rm, "MODEL_PATH", tmp_path / "없는파일.joblib")
+
+    bundle = rm.build_model(_dataset())
+
+    assert bundle is not None
+    assert bundle["method"] in rm.METHODS
+    probabilities = rm.predict_proba(bundle, [
+        _label("교육", "기업 AI 교육 도입 확대", "relevant", "u1"),
+        _label("교육", "연예인 결혼 소식 화제", "irrelevant", "u2"),
+    ])
+    assert probabilities[0] > probabilities[1]
+
+
+def test_build_model_returns_none_when_worse_than_guessing():
+    """찍기보다 못한 모델은 안 쓴다 — 무작위보다 나쁜 점수로 화면 순위를
+    정렬하느니 최신순이 낫다. CLI·성능 탭이 이미 같은 규칙으로 저장을 막는데
+    여기만 예외를 두면 그 방어가 뚫린다."""
+    # 제목과 라벨의 관계를 없애 학습이 불가능하게 만든 데이터
+    labels = [_label("교육", f"동일한 제목 {i}", "relevant" if i % 3 else "irrelevant",
+                     f"u{i}", date(2026, 8, 3) if i % 2 else date(2026, 8, 10))
+              for i in range(60)]
+
+    assert rm.build_model(labels) is None
+
+
+def test_build_model_returns_none_without_labels():
+    assert rm.build_model([]) is None
+
+
+def test_labels_signature_changes_when_a_label_is_edited():
+    """건수만 보면 "수정"이나 "취소 후 재라벨"처럼 건수가 그대로인 변경을
+    놓쳐서, 화면이 옛 모델을 계속 쓴다."""
+    from datetime import datetime
+
+    before = [{"labeled_at": datetime(2026, 8, 19, 1, 0)}, {"labeled_at": datetime(2026, 8, 19, 2, 0)}]
+    after = [{"labeled_at": datetime(2026, 8, 19, 1, 0)}, {"labeled_at": datetime(2026, 8, 19, 3, 0)}]
+
+    assert rm.labels_signature(before) != rm.labels_signature(after)
+    assert rm.labels_signature(before) == rm.labels_signature(list(before))

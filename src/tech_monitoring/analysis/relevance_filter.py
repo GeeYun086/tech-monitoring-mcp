@@ -199,7 +199,25 @@ def judge_keyword(conn, run_id: int, fixed_keyword: dict, articles: list[dict], 
     }
 
 
-def judge_all(conn, run_id: int, *, allow_llm_fallback: bool = False) -> list[dict]:
+def get_model(conn):
+    """이번 판단에 쓸 분류기. **DB의 라벨이 원본**이고 파일은 보지 않는다.
+
+    작업 6(2026-08-19): 예전에는 models/relevance_classifier.joblib을 읽었는데,
+    배포 환경의 파일시스템은 재시작하면 초기화돼서 학습해둔 모델이 사라진다.
+    라벨은 DB에 있으니 그걸로 그때그때 만들면 파일 유무와 무관하게 동작한다.
+    같은 이유로 "학습은 했는데 파일을 안 만들어 화면이 최신순으로 돌아가는"
+    상태도 생기지 않는다.
+
+    재학습 비용이 걱정되는 곳(화면)은 호출부가 bundle을 캐시해 넘긴다 —
+    judge_all(conn, run_id, bundle=...). 파이프라인은 주 1회라 그냥 만든다.
+    """
+    from tech_monitoring.labeling import fetch_all_labels
+    from tech_monitoring.relevance_model import build_model
+
+    return build_model(fetch_all_labels(conn))
+
+
+def judge_all(conn, run_id: int, *, bundle=None, allow_llm_fallback: bool = False) -> list[dict]:
     """이번 run에 수집된 기사 전체를 딱 한 번 가져와서, 활성 고정 키워드
     각각에 대해 배치 판단한다(기사 목록 자체는 고정 키워드마다 재사용 —
     수집은 한 번, 판단만 키워드 수만큼).
@@ -210,12 +228,18 @@ def judge_all(conn, run_id: int, *, allow_llm_fallback: bool = False) -> list[di
     라벨링한 것 자체가 된다. Gemini 경로는 지우지 않고 allow_llm_fallback로
     남겨둔다(비교 실험용).
 
+    "모델이 없다"에는 **찍기 기준선을 못 넘어 쓰지 않기로 한 경우**도 포함된다
+    (relevance_model.build_model이 그때 None을 돌려준다) — 무작위보다 못한
+    점수로 화면 순위를 정렬하느니 최신순이 낫다.
+
+    bundle을 주면 그걸 쓴다(화면이 캐시한 모델을 넘길 때). 안 주면 DB 라벨로
+    그 자리에서 만든다(get_model 참고).
+
     어느 쪽으로 판단했는지는 결과의 "method"에 남는다 — 모델이 있는 줄
     알았는데 조용히 다른 경로를 타는 상황을 알아챌 수 있게.
     """
-    from tech_monitoring.relevance_model import load_model
-
-    bundle = load_model()
+    if bundle is None:
+        bundle = get_model(conn)
     keywords = get_active_fixed_keywords(conn)
 
     if bundle is None and not allow_llm_fallback:
