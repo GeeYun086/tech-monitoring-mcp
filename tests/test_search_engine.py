@@ -68,8 +68,10 @@ class _FakeConn:
         pass
 
 
-def _item(url: str) -> dict:
-    return {"url": url, "title": "제목", "content": "요약"}
+def _item(url: str, published_date: str | None = "Tue, 11 Aug 2026 16:25:20 GMT") -> dict:
+    # 발행일은 기본으로 채운다 — 없는 기사는 아예 저장하지 않기로 했으므로
+    # (2026-08-19), 날짜가 빠지면 모든 저장 테스트가 "0건"이 돼버린다.
+    return {"url": url, "title": "제목", "content": "요약", "published_date": published_date}
 
 
 # ---- is_allowed_url: 담당자가 실제로 준 화이트리스트 패턴 검증 ----
@@ -478,7 +480,7 @@ def test_derive_title_falls_back_when_snippet_is_missing_too():
 def test_pool_insert_uses_derived_title(monkeypatch):
     monkeypatch.setattr(search_engine, "_fetch_site_results", lambda term, domain, start, end: [
         {"url": "https://www.techmeme.com/260819/p1", "title": "Techmeme",
-         "content": "Mike Wheatley / SiliconANGLE: Palona raised $20M"},
+         "content": "Mike Wheatley / SiliconANGLE: Palona raised $20M", "published_date": "Tue, 11 Aug 2026 16:25:20 GMT"},
     ])
     conn = _FakeConn()
 
@@ -500,8 +502,10 @@ def test_pool_skips_duplicate_titles_from_different_urls(monkeypatch):
     """Techmeme 리버 앵커는 URL이 달라도 같은 글을 가리킬 수 있다(실측 41건 중
     6건 중복). 그대로 두면 라벨링에서 같은 내용을 두 번 판단하게 된다."""
     monkeypatch.setattr(search_engine, "_fetch_site_results", lambda term, domain, start, end: [
-        {"url": "https://www.techmeme.com/260819/p3", "title": "Techmeme", "content": "같은 헤드라인"},
-        {"url": "https://www.techmeme.com/260819/p16", "title": "Techmeme", "content": "같은 헤드라인"},
+        {"url": "https://www.techmeme.com/260819/p3", "title": "Techmeme", "content": "같은 헤드라인",
+         "published_date": "Tue, 11 Aug 2026 16:25:20 GMT"},
+        {"url": "https://www.techmeme.com/260819/p16", "title": "Techmeme", "content": "같은 헤드라인",
+         "published_date": "Tue, 11 Aug 2026 16:25:20 GMT"},
     ])
     conn = _FakeConn()
 
@@ -509,3 +513,22 @@ def test_pool_skips_duplicate_titles_from_different_urls(monkeypatch):
 
     assert result["inserted"] == 1
     assert [p[2] for p in conn.inserted_params] == ["같은 헤드라인"]
+
+
+def test_pool_skips_articles_without_a_publication_date(monkeypatch):
+    """발행일이 없으면 담지 않는다(2026-08-19 담당자 결정).
+
+    주차가 이 프로젝트의 기준축이라서다 — 화면의 주차 선택, 라벨의 주차 그룹,
+    모델 평가의 fold 분리가 전부 발행 주로 돌아간다. 날짜가 없는 기사만 어느
+    주에도 속하지 않아 "날짜 미상" 칸이 따로 생기고, 라벨의 주차는 수집 주로
+    폴백해 실제 발행 시점과 어긋난다(실측 221건 중 10건뿐이라 예외 경로를
+    유지하는 복잡도가 얻는 것보다 컸다)."""
+    monkeypatch.setattr(search_engine, "_fetch_site_results", lambda term, domain, start, end: [
+        _item("https://techcrunch.com/2026/08/13/dated/"),
+        _item("https://techcrunch.com/2026/08/13/undated/", published_date=None),
+    ])
+
+    result = search_engine.collect_pool_for_site(_FakeConn(), 1, "techcrunch.com", _START, _END)
+
+    assert result["inserted"] == 1        # 날짜 있는 것만
+    assert result["fetched"] == 4         # 가져오긴 다 가져왔다(질의 2개 × 2건)

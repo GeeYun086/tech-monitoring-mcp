@@ -350,9 +350,21 @@ def _insert_pool_article(conn, *, run_id: int, domain: str, query: str, item: di
     (실측 2026-08-19: 41건 중 고유 제목 35건 = 6건이 중복). URL이 다르니
     ON CONFLICT (run_id, url)로는 안 걸러지고, 라벨링 화면에서 같은 내용을
     두 번 판단하게 된다. 정보를 버리는 게 아니라 같은 글을 한 번만 남기는
-    것이라 URL 정규화와 같은 성격의 중복 제거다."""
+    것이라 URL 정규화와 같은 성격의 중복 제거다.
+
+    **발행일이 없는 기사는 아예 담지 않는다**(2026-08-19 담당자 결정). 이
+    프로젝트의 거의 모든 것이 "몇 주차 기사인가"를 기준으로 돌아간다 —
+    화면의 주차 선택, 라벨의 주차 그룹(labeling._label_period_start), 그리고
+    모델 평가의 fold 분리(relevance_model.build_groups)까지. 발행일이 없으면
+    그 기사만 어느 주에도 속하지 않아서, 화면엔 "날짜 미상"이라는 별도 칸이
+    생기고 라벨의 주차 그룹은 수집 주로 폴백해 실제 발행 시점과 어긋난다.
+    실측 2026-08-19 기준 221건 중 10건(4.5%)뿐이라, 예외 경로를 유지하는
+    복잡도가 얻는 것보다 크다고 판단했다."""
     url = item.get("url")
     if not url:
+        return False
+    published_at = _parse_published_date(item.get("published_date"))
+    if published_at is None:
         return False
     title = derive_title(item, domain)
     with conn.cursor() as cur:
@@ -374,7 +386,7 @@ def _insert_pool_article(conn, *, run_id: int, domain: str, query: str, item: di
                 normalize_url(url),
                 _extract_domain(url),
                 item.get("content"),
-                _parse_published_date(item.get("published_date")),
+                published_at,
                 run_id,
                 title,
             ),

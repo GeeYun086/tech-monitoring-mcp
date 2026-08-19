@@ -45,7 +45,7 @@ from tech_monitoring import relevance_model
 from tech_monitoring.analysis.relevance_filter import judge_all
 from tech_monitoring.collectors.search_engine import search_once
 from tech_monitoring.db.connection import get_connection
-from tech_monitoring.db.weekly_run import get_run_period
+from tech_monitoring.db.weekly_run import get_run_period, week_bounds_for
 
 st.set_page_config(page_title="AX 시장 모니터링", layout="wide")
 
@@ -150,6 +150,18 @@ _ALL_WEEKS = "전체 기간"
 _UNDATED_LABEL = "날짜 미상"
 
 
+def _week_label(week_start) -> str:
+    """주를 "8/10~8/16"처럼 **기간 범위**로 적는다(2026-08-19 담당자 요청).
+
+    월요일 날짜 하나만 적으면("2026-08-10 주") 그게 그 주의 시작인지, 그 날
+    수집했다는 뜻인지 읽는 사람이 알 수 없다. 이 프로젝트는 "월요일에 직전
+    주를 걷는다"라서 수집일과 기사 발행 주가 항상 어긋나 있어 더 헷갈린다 —
+    8/17에 걷은 건 8/10~8/16 기사다. 범위로 적으면 그 혼동이 사라진다.
+    """
+    _monday, sunday = week_bounds_for(week_start)
+    return f"{week_start.month}/{week_start.day}~{sunday.month}/{sunday.day}"
+
+
 def _week_options(conn, run_id: int) -> dict:
     """주차 선택 라벨 -> week_start 값. 소급 수집(작업 4)으로 한 run에 여러 주가
     섞여 있어서, 한 주씩 골라 보고 라벨할 수 있어야 한다 — 후보가 최신순이라
@@ -160,7 +172,7 @@ def _week_options(conn, run_id: int) -> dict:
         if week["week_start"] is None:
             options[f"{_UNDATED_LABEL} ({week['total']}건)"] = labeling.UNDATED
         else:
-            options[f"{week['week_start']} 주 ({week['total']}건)"] = week["week_start"]
+            options[f"{_week_label(week['week_start'])} ({week['total']}건)"] = week["week_start"]
     return options
 
 
