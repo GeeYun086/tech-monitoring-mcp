@@ -106,6 +106,18 @@ SITE_INCLUDE_PATTERNS = [
     "*.techcrunch.com/*",
     "askedtech.com/knowledge-archive/*",
     "www.techmeme.com/*",
+    # 교육 매체 4곳(2026-08-19 추가). 일반 테크 매체만 보고 있어서 "교육"
+    # 시장의 후보가 거의 안 걷혔다 — 실측: 기사 152건 중 제목에 교육이 걸린
+    # 건 4건, 교육 검색어를 직접 던져도 주당 8건뿐이었다. 원인이 검색어가
+    # 아니라 **창문(수집원)에 교육 매체가 없다**는 것이라, 소스를 늘린다.
+    # 아래 패턴은 후보 검증(3주치 실측) 때 나온 실제 기사 URL 형태다.
+    "www.edpl.co.kr/news/*",            # 교육플러스 — 3주 8건
+    "edu.donga.com/news/*",             # 에듀동아 — 3주 7건
+    "www.insidehighered.com/news/*",    # Inside Higher Ed — 3주 20건(상한)
+    "www.insidehighered.com/opinion/*",
+    "www.edweek.org/technology/*",      # EdWeek — 3주 6건
+    "www.edweek.org/leadership/*",
+    "www.edweek.org/teaching-learning/*",
 ]
 
 SITE_EXCLUDE_PATTERNS = [
@@ -124,6 +136,11 @@ SITE_EXCLUDE_PATTERNS = [
     "*.techcrunch.com/author/*",
     "*.techcrunch.com/category/*",
     "*.techcrunch.com/tag/*",
+    # 교육 매체의 목록·저자 페이지. 한국 매체 둘은 같은 CMS라 목록 URL도 같은 모양이다.
+    "www.edpl.co.kr/news/articleList.html*",
+    "edu.donga.com/news/articleList.html*",
+    "www.insidehighered.com/*/author/*",
+    "www.edweek.org/*/author/*",
 ]
 
 # 위 include 패턴에서 순수 도메인만 뽑아 Tavily include_domains(검색 범위
@@ -135,11 +152,16 @@ SITE_DOMAINS = [
     "techcrunch.com",
     "askedtech.com",
     "techmeme.com",
+    "edpl.co.kr",
+    "edu.donga.com",
+    "insidehighered.com",
+    "edweek.org",
 ]
 
 # 사이트별 언어 — 어느 search_terms_* 목록을 쓸지 결정한다(2026-08-13 추가).
-KOREAN_DOMAINS = {"itworld.co.kr", "aitimes.com", "news.hada.io"}
-ENGLISH_DOMAINS = {"techcrunch.com", "askedtech.com", "techmeme.com"}
+KOREAN_DOMAINS = {"itworld.co.kr", "aitimes.com", "news.hada.io", "edpl.co.kr", "edu.donga.com"}
+ENGLISH_DOMAINS = {"techcrunch.com", "askedtech.com", "techmeme.com",
+                   "insidehighered.com", "edweek.org"}
 
 # collected_articles.source_name에 남길 표시 이름(v3 수집기의 관례와 같은 모양).
 SITE_NAMES = {
@@ -149,6 +171,10 @@ SITE_NAMES = {
     "techcrunch.com": "TechCrunch",
     "askedtech.com": "AskedTech",
     "techmeme.com": "Techmeme",
+    "edpl.co.kr": "교육플러스",
+    "edu.donga.com": "에듀동아",
+    "insidehighered.com": "Inside Higher Ed",
+    "edweek.org": "EdWeek",
 }
 
 # 공용 기사 풀을 만드는 넓은 질의(006 마이그레이션 헤더 참고). **사용자가

@@ -532,3 +532,45 @@ def test_pool_skips_articles_without_a_publication_date(monkeypatch):
 
     assert result["inserted"] == 1        # 날짜 있는 것만
     assert result["fetched"] == 4         # 가져오긴 다 가져왔다(질의 2개 × 2건)
+
+
+# ---- 교육 매체 4곳(2026-08-19 추가) ----
+
+@pytest.mark.parametrize("url", [
+    "https://edu.donga.com/news/articleView.html?idxno=110849",
+    "https://www.edpl.co.kr/news/articleView.html?idxno=21257",
+    "https://www.insidehighered.com/news/tech-innovation/artificial-intelligence/2026/08/01/x",
+    "https://www.insidehighered.com/opinion/columns/call-action/2026/07/29/how-ai-shaping",
+    "https://www.edweek.org/technology/students-created-a-national-ai-policy-framework/2026/08",
+])
+def test_education_media_article_urls_pass(url):
+    """후보 검증(2026-08-19, 3주치 실측) 때 Tavily가 실제로 돌려준 URL 형태다.
+    패턴이 어긋나면 수집은 되는데 전부 걸러져 "교육 기사가 여전히 0건"이 된다."""
+    assert search_engine.is_allowed_url(url)
+
+
+@pytest.mark.parametrize("url", [
+    "https://www.edpl.co.kr/news/articleList.html?sc_section_code=S1N1",
+    "https://edu.donga.com/news/articleList.html?view_type=sm",
+    "https://www.insidehighered.com/news/author/john-doe",
+    "https://www.edweek.org/technology/author/jane",
+])
+def test_education_media_list_and_author_pages_are_blocked(url):
+    """목록·저자 페이지는 기사가 아니다 — 라벨링 화면에 올라가면 판단할 내용이 없다."""
+    assert not search_engine.is_allowed_url(url)
+
+
+def test_every_collected_domain_has_a_language_and_a_display_name():
+    """도메인을 추가하고 언어 분류나 표시 이름을 빠뜨리면, 영어 사이트에 한국어
+    질의가 나가거나(003의 실패 사례) source_name에 도메인이 그대로 박힌다."""
+    assert set(search_engine.SITE_DOMAINS) == (
+        search_engine.KOREAN_DOMAINS | search_engine.ENGLISH_DOMAINS
+    )
+    assert set(search_engine.SITE_DOMAINS) == set(search_engine.SITE_NAMES)
+
+
+def test_education_media_get_queries_in_the_right_language():
+    assert search_engine.broad_queries_for_domain("edpl.co.kr") == search_engine.BROAD_QUERIES_KO
+    assert search_engine.broad_queries_for_domain("edu.donga.com") == search_engine.BROAD_QUERIES_KO
+    assert search_engine.broad_queries_for_domain("edweek.org") == search_engine.BROAD_QUERIES_EN
+    assert search_engine.broad_queries_for_domain("insidehighered.com") == search_engine.BROAD_QUERIES_EN
