@@ -118,7 +118,7 @@ def test_judge_all_reuses_same_articles_across_keywords(monkeypatch):
     monkeypatch.setattr(rf, "judge_keyword", lambda conn, run_id, kw, articles, bundle=None: judge_calls.append((kw["id"], articles)) or {"ok": kw["id"]})
     # 모델이 없으면 판단 자체를 건너뛰므로(2026-08-19), 이 테스트가 재사용을
     # 검증할 수 있도록 모델이 있는 상황을 만든다.
-    monkeypatch.setattr("tech_monitoring.relevance_model.load_model", lambda *a, **k: {"method": "tfidf"})
+    monkeypatch.setattr(rf, "get_model", lambda conn: {"method": "tfidf"})
 
     results = rf.judge_all(conn=None, run_id=7)
 
@@ -220,7 +220,7 @@ def test_judge_all_skips_judging_when_no_model_trained(monkeypatch):
     LLM을 부를 이유가 없다. 점수가 없으면 화면이 최신순 전체를 보여주고,
     그 주 결과물은 사람이 라벨링한 것 자체가 된다. 실패가 아니므로 error는
     비어 있어야 한다(담으면 파이프라인이 매주 실패로 마감된다)."""
-    monkeypatch.setattr("tech_monitoring.relevance_model.load_model", lambda *a, **k: None)
+    monkeypatch.setattr(rf, "get_model", lambda conn: None)
     monkeypatch.setattr(rf, "get_active_fixed_keywords", lambda conn: [{"id": 1, "keyword": "교육"}])
     fetched, judged = [], []
     monkeypatch.setattr(rf, "fetch_collected_articles", lambda conn, run_id: fetched.append(run_id) or [])
@@ -236,7 +236,7 @@ def test_judge_all_skips_judging_when_no_model_trained(monkeypatch):
 
 def test_judge_all_can_still_use_gemini_when_explicitly_allowed(monkeypatch):
     """Gemini 경로는 지우지 않고 비교 실험용으로 남겨둔다."""
-    monkeypatch.setattr("tech_monitoring.relevance_model.load_model", lambda *a, **k: None)
+    monkeypatch.setattr(rf, "get_model", lambda conn: None)
     monkeypatch.setattr(rf, "fetch_collected_articles", lambda conn, run_id: [{"id": 1, "title": "기사"}])
     monkeypatch.setattr(rf, "get_active_fixed_keywords", lambda conn: [{"id": 1, "keyword": "교육"}])
     bundles = []
@@ -249,10 +249,10 @@ def test_judge_all_can_still_use_gemini_when_explicitly_allowed(monkeypatch):
 
 
 def test_judge_all_loads_model_once_for_all_keywords(monkeypatch):
-    """키워드마다 모델을 다시 불러오면 임베딩 방식일 때 로드가 반복돼 느려진다."""
+    """키워드마다 모델을 다시 만들면 임베딩 방식일 때 학습이 반복돼 느려진다."""
     load_calls = []
-    monkeypatch.setattr("tech_monitoring.relevance_model.load_model",
-                        lambda *a, **k: load_calls.append(1) or {"method": "tfidf"})
+    monkeypatch.setattr(rf, "get_model",
+                        lambda conn: load_calls.append(1) or {"method": "tfidf"})
     monkeypatch.setattr(rf, "fetch_collected_articles", lambda conn, run_id: [{"id": 1, "title": "기사"}])
     monkeypatch.setattr(rf, "get_active_fixed_keywords", lambda conn: [
         {"id": 1, "keyword": "교육"}, {"id": 2, "keyword": "실적"}, {"id": 3, "keyword": "도입"},
@@ -277,3 +277,21 @@ def test_classifier_failure_is_reported_not_swallowed(monkeypatch):
 
     assert result["error"] == "RuntimeError: 모델 손상"
     assert result["method"] == "classifier:tfidf"
+
+
+def test_judge_all_uses_the_bundle_the_caller_passes(monkeypatch):
+    """화면은 캐시해둔 모델을 넘긴다(작업 6) — 그때는 다시 만들지 않아야 한다.
+    임베딩 방식은 학습에 수십 초가 걸려서, 매 재렌더마다 만들면 못 쓴다."""
+    built = []
+    monkeypatch.setattr(rf, "get_model", lambda conn: built.append(1) or {"method": "tfidf"})
+    monkeypatch.setattr(rf, "fetch_collected_articles", lambda conn, run_id: [{"id": 1, "title": "기사"}])
+    monkeypatch.setattr(rf, "get_active_fixed_keywords", lambda conn: [{"id": 1, "keyword": "교육"}])
+    seen = []
+    monkeypatch.setattr(rf, "judge_keyword",
+                        lambda conn, run_id, kw, arts, bundle=None: seen.append(bundle) or {"ok": True})
+
+    given = {"method": "embedding"}
+    rf.judge_all(conn=None, run_id=1, bundle=given)
+
+    assert seen == [given]
+    assert built == []          # 넘겨받았으면 다시 만들지 않는다

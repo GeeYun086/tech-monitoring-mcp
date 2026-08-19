@@ -309,6 +309,23 @@ def _render_label_review(conn, fixed_keyword: dict) -> None:
                 st.rerun()
 
 
+@st.cache_resource(show_spinner=False)
+def _model(_labels: list[dict], cache_key: tuple):
+    """라벨에서 만든 분류기를 프로세스에 캐시한다(작업 6).
+
+    파일(models/*.joblib)을 읽지 않는 게 핵심 — 배포 환경의 파일시스템은
+    재시작하면 초기화돼서, 학습해 저장해둔 모델이 조용히 사라진다. 라벨은
+    DB에 있으므로 그걸 원본으로 삼아 필요할 때 다시 만든다.
+
+    cache_key에 라벨 수와 마지막 라벨 시각이 들어 있어(relevance_model.
+    labels_signature) 라벨이 늘거나 수정되면 자동으로 다시 학습한다. 그
+    전까지는 재렌더마다 다시 만들지 않는다 — 임베딩 방식은 모델 로드에만
+    수십 초가 걸려 매번 하면 화면을 못 쓴다. cache_data가 아니라
+    cache_resource인 이유도 같다(학습된 모델은 직렬화 대상이 아니다).
+    """
+    return relevance_model.build_model(_labels)
+
+
 @st.cache_data(show_spinner=False)
 def _measure(_labels: list[dict], cache_key: tuple) -> list[dict]:
     """채점 결과를 캐시한다. cache_key에 라벨 수·분포를 넣어, 라벨이 늘면
@@ -463,21 +480,21 @@ def _render_performance_tab(conn) -> None:
         return
 
     with st.spinner("가장 성능이 좋은 방식으로 최종 모델을 학습하는 중입니다…"):
-        estimator = relevance_model.train_final_model(labels, best["method"])
-        path = relevance_model.save_model(estimator, best["method"], best["metrics"])
+        bundle = _model(labels, cache_key)
     st.success(
         f"**{best['method']}** 방식이 가장 좋았습니다(F1 {best['metrics']['f1']:.3f}). "
-        f"이 모델을 `{path.name}`로 저장했습니다."
+        "이 모델은 라벨에서 바로 만들어 메모리에 둡니다 — 파일에 의존하지 않으므로 "
+        "배포 환경에서 재시작돼도 라벨만 있으면 그대로 복원됩니다."
     )
 
-    # 모델만 저장하고 끝내면 시장 탭은 여전히 옛 순서(또는 최신순)를 보여준다.
+    # 모델만 만들고 끝내면 시장 탭은 여전히 옛 순서(또는 최신순)를 보여준다.
     # 라벨링 → 측정 → 목록 갱신이 한 번에 이어지도록 여기서 바로 재판단한다
     # (파이프라인을 다시 돌릴 필요가 없다 — 수집은 그대로 쓰고 점수만 갱신).
     run = dq.get_latest_run(conn)
     if run is None:
         return
     with st.spinner("새 모델로 이번 주 기사 순위를 다시 매기는 중입니다…"):
-        judged = judge_all(conn, run["id"])
+        judged = judge_all(conn, run["id"], bundle=bundle)
     total = sum(r["judged"] for r in judged)
     st.success(
         f"이번 주 기사 {total}건에 시장별 점수를 다시 매겼습니다. "

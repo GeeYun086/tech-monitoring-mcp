@@ -299,6 +299,49 @@ def train_final_model(labels: list[dict], method: str):
     return estimator
 
 
+def labels_signature(labels: list[dict]) -> tuple:
+    """라벨 집합이 바뀌었는지 값 하나로 판정하는 키(호출부 캐시 무효화용).
+
+    건수만 보면 "수정"(update_label)이나 "취소 후 재라벨"처럼 건수가 그대로인
+    변경을 놓친다. 그래서 마지막 라벨 시각도 함께 본다.
+    """
+    latest = max((row.get("labeled_at") for row in labels if row.get("labeled_at")), default=None)
+    return (len(labels), str(latest))
+
+
+def build_model(labels: list[dict], k: int = DEFAULT_K) -> dict | None:
+    """라벨에서 곧바로 쓸 수 있는 모델을 만든다 — **파일을 거치지 않는다**.
+
+    작업 6(2026-08-19)의 핵심. 그전에는 models/relevance_classifier.joblib을
+    읽어야만 분류기가 동작했는데, 배포 환경(Streamlit Cloud 등)의 파일시스템은
+    재시작하면 초기화된다 — 성능 탭에서 학습해 저장해도 얼마 뒤 사라지고,
+    화면은 "모델 없음"으로 되돌아간다. 라벨은 DB에 있으므로 그걸 원본으로
+    삼아 필요할 때 다시 만드는 게 맞다.
+
+    두 방식을 채점해 이긴 쪽으로 전체 라벨을 다시 학습한다(채점은 이미
+    out-of-fold로 끝났으므로 최종 모델은 데이터를 한 건도 버리지 않는다).
+
+    **찍기 기준선을 못 넘으면 None을 돌려준다** — 모델이 없는 것과 같게
+    취급하라는 뜻이다. CLI·성능 탭이 이미 같은 규칙으로 저장을 막고 있는데
+    (train_relevance_classifier.py 주석 참고), 여기만 예외를 두면 찍기보다
+    못한 점수로 화면 순위를 정렬하게 된다.
+    """
+    if not labels:
+        return None
+
+    results = evaluate_all(labels, k=k)
+    best = results[0]
+    if not best.get("ok"):
+        return None
+
+    baseline = best["distribution"]["majority_accuracy"]
+    if best["metrics"]["accuracy"] <= baseline:
+        return None
+
+    estimator = train_final_model(labels, best["method"])
+    return {"estimator": estimator, "method": best["method"], "metrics": best["metrics"]}
+
+
 def save_model(estimator, method: str, metrics: dict, path: Path = MODEL_PATH) -> Path:
     import joblib
 

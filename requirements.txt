@@ -1,0 +1,17 @@
+# Streamlit Community Cloud 배포용 의존성(2026-08-19).
+#
+# 이 프로젝트 자체를 설치한다 — 의존성 목록은 pyproject.toml 한 곳에만 두고
+# 여기서 다시 나열하지 않는다(두 곳에 적으면 반드시 어긋난다). src/ 레이아웃이라
+# 설치를 해야 app/streamlit_app.py의 `import tech_monitoring`이 동작한다.
+#
+# **[embedding] extra를 일부러 넣지 않는다.** sentence-transformers는 torch를
+# 끌고 오는데 설치만 527MB + 실행 시 다국어 모델 458MB를 더 받는다. 무료 티어
+# 용량으로는 배포가 실패하거나 극단적으로 느려진다. 없으면 임베딩 방식만
+# 건너뛰고(relevance_model.evaluate가 ImportError를 잡아 reason에 담는다)
+# 문자 n-gram TF-IDF로만 채점하며, **라벨링 화면은 그대로 동작한다** —
+# 배포의 목적이 담당자와 함께 라벨을 모으는 것이라 이 조합이 맞다.
+#
+# 임베딩 방식 비교는 개발 PC에서 한다:
+#   ./.venv/Scripts/python.exe -m pip install -e ".[embedding]"
+#   ./.venv/Scripts/python.exe scripts/train_relevance_classifier.py
+.
