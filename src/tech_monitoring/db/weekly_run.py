@@ -76,17 +76,22 @@ def mark_bootstrapped(conn, today: date | None = None) -> None:
 def target_weeks(bootstrap: bool, today: date | None = None) -> list[tuple[date, date]]:
     """이번 실행에서 수집할 달력 주 목록(오래된 주부터).
 
-    최초에는 이번 주를 **포함해** 3주 — 지금 당장 라벨링을 시작할 수 있어야
-    하므로 진행 중인 주라도 있는 만큼 걷는다. 그 뒤로는 완료된 직전 주 하나만
-    걷는다(previous_week_bounds 참고).
-    """
-    today = today or date.today()
-    if not bootstrap:
-        return [previous_week_bounds(today)]
+    **언제나 완료된 주만 걷는다.** 최초에는 완료된 최근 3주, 그 뒤로는 직전
+    주 하나. 진행 중인 주는 어느 경우에도 걷지 않는다 — 그 주는 다음 월요일
+    실행이 온전한 7일치로 담당한다(2026-08-19 담당자 확인).
 
-    this_monday, _end = week_bounds_for(today)
-    return [week_bounds_for(this_monday - timedelta(weeks=n))
-            for n in range(BOOTSTRAP_WEEKS - 1, -1, -1)]
+    최초에도 이번 주를 뺀 이유: 진행 중인 주를 섞으면 "8/17 주"라는 같은
+    이름의 데이터가 이번엔 사흘치, 다음 주엔 7일치가 되어 주차별 비교가
+    어긋난다. 라벨의 주차 그룹도 마찬가지로 반쪽짜리 주를 하나 더 만든다.
+
+    예) 오늘이 2026-08-19(수)라면
+        최초  : 7/27~8/02, 8/03~8/09, 8/10~8/16   (8/17~ 은 아직 진행 중)
+        그 뒤 : 8/24(월)에 8/17~8/23
+    """
+    last_monday, _end = previous_week_bounds(today)
+    count = BOOTSTRAP_WEEKS if bootstrap else 1
+    return [week_bounds_for(last_monday - timedelta(weeks=n))
+            for n in range(count - 1, -1, -1)]
 
 
 def plan_collection(conn, today: date | None = None) -> dict:

@@ -151,14 +151,26 @@ def test_previous_week_is_stable_regardless_of_weekday_run():
     assert wr.previous_week_bounds(date(2026, 8, 26)) == wr.previous_week_bounds(date(2026, 8, 24))
 
 
-def test_bootstrap_collects_three_weeks_including_this_one():
+def test_bootstrap_collects_three_completed_weeks_not_the_current_one():
+    """진행 중인 주는 최초 수집에서도 뺀다 — 섞으면 "8/17 주"가 이번엔 사흘치,
+    다음 주엔 7일치가 되어 주차별 비교가 어긋난다(2026-08-19 담당자 확인).
+    8/19(수)에 돌리면 8/17~ 은 아직 진행 중이므로 그 이전 3주를 걷는다."""
     weeks = wr.target_weeks(bootstrap=True, today=date(2026, 8, 19))
 
     assert weeks == [
+        (date(2026, 7, 27), date(2026, 8, 2)),
         (date(2026, 8, 3), date(2026, 8, 9)),
         (date(2026, 8, 10), date(2026, 8, 16)),
-        (date(2026, 8, 17), date(2026, 8, 23)),   # 이번 주 포함
     ]
+
+
+def test_bootstrap_and_regular_share_the_same_completed_week_rule():
+    """최초든 평상시든 "가장 최근에 완료된 주"가 마지막 원소여야 한다 —
+    다음 주 월요일 실행이 그 다음 주를 이어받는 구조."""
+    bootstrap = wr.target_weeks(bootstrap=True, today=date(2026, 8, 24))
+    regular = wr.target_weeks(bootstrap=False, today=date(2026, 8, 24))
+
+    assert bootstrap[-1] == regular[-1] == (date(2026, 8, 17), date(2026, 8, 23))
 
 
 def test_regular_run_collects_only_the_previous_week():
@@ -173,7 +185,7 @@ def test_run_period_is_the_most_recent_collected_week():
     plan = wr.plan_collection(conn, today=date(2026, 8, 19))
 
     assert plan["bootstrap"] is True
-    assert plan["run_period"] == (date(2026, 8, 17), date(2026, 8, 23))
+    assert plan["run_period"] == (date(2026, 8, 10), date(2026, 8, 16))
     assert len(plan["weeks"]) == wr.BOOTSTRAP_WEEKS
 
 
