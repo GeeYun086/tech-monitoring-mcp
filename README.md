@@ -51,14 +51,48 @@ cp .env.example .env
 ```
 
 `.env`에 채울 것:
-- `DATABASE_URL` — Supabase(Postgres 호환) 연결 문자열
+- `DATABASE_URL` — **팀 공용 Supabase 주소**(담당자에게 받는다). `.env.example`의
+  `localhost` 기본값을 그대로 두면 안 된다 — 아래 "새 PC에서 시작할 때" 참고
 - `TAVILY_API_KEY` — [tavily.com](https://tavily.com)에서 발급(무료 티어, 카드 등록 불필요).
   화이트리스트 사이트 목록은 `collectors/search_engine.py`의
   `SITE_INCLUDE_PATTERNS`/`SITE_EXCLUDE_PATTERNS`에 코드로 관리(수정 시 이 파일만 고치면 됨)
-- `GEMINI_API_KEY` — 무료 티어
+- `GEMINI_API_KEY` — 무료 티어. 동의어 병합에만 쓰고, 비어 있어도 파이프라인은
+  죽지 않는다(단독 그룹 폴백)
 
 ```bash
 ./.venv/Scripts/python.exe -m tech_monitoring.db.migrate   # 스키마 적용(db/migrations/)
+./.venv/Scripts/python.exe -m pytest tests/ -q             # 세팅 확인
+```
+
+### 새 PC에서 시작할 때 — DB를 새로 만들지 말 것
+
+**마이그레이션·수집한 기사·라벨은 전부 DB에 묶여 있지 컴퓨터에 묶여 있지
+않다.** 그래서 새 PC에서 해야 할 일은 위 세 줄과 `.env`에 **기존 Supabase
+주소를 넣는 것**뿐이다. 그러면
+
+- 마이그레이션은 전부 `skipping ... (already applied)`로 건너뛰고,
+- 이미 수집된 기사를 그대로 쓰므로 **Tavily 크레딧이 0**이며,
+- 라벨이 한 곳에 쌓인다(`labeled_by`로 사람 구분 — 005 마이그레이션).
+
+Supabase는 이미 클라우드에 떠 있으므로 **따로 배포할 것이 없다**. 별도로
+배포가 필요한 건 앱(대시보드·MCP)이지 DB가 아니다.
+
+> **2026-08-19 실제 사고**: 새 PC에서 `.env.example`을 그대로 복사해
+> `localhost`를 보게 됐다. 그 결과 빈 DB가 하나 더 생겨 마이그레이션을
+> 처음부터 다시 적용했고, 기사를 다시 수집하느라 크레딧을 두 번 썼으며,
+> 라벨이 두 DB로 갈라질 뻔했다. `.env.example` 상단 주석은 이 재발을 막기
+> 위한 것이다.
+
+`docker-compose.yml`의 Postgres는 **로컬 실험 전용**이다. 평소 개발에서 이걸
+띄우면 위와 같은 두 번째 DB가 생긴다.
+
+### 이미 두 개의 DB로 갈라졌다면
+
+라벨만 옮기면 된다(기사는 다시 수집하면 되지만 라벨은 사람 손이 들어간
+자산이다). 옮긴 뒤 로컬 DB는 버려도 된다.
+
+```bash
+pg_dump -t article_labels --data-only <옛DB> | psql <공용Supabase>
 ```
 
 ## 고정 키워드(모니터링 대상 시장) 설정
