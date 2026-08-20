@@ -118,6 +118,12 @@ SITE_INCLUDE_PATTERNS = [
     "www.edweek.org/technology/*",      # EdWeek — 3주 6건
     "www.edweek.org/leadership/*",
     "www.edweek.org/teaching-learning/*",
+    # 국내 IT 매체 2곳(2026-08-19 추가). 한국어 매체가 45%인데 국내 기업이
+    # 언급된 기사는 7%(152건 중 10건)뿐이었다 — AI타임스·ITWorld·GeekNews가
+    # 한국어지만 주로 글로벌 AI 소식을 전하는 성격이라 국내 기업·AX 시장
+    # 소식이 비었다. 후보 검증에서 두 곳 다 국내 기업·AX 기사가 실제로 나왔다.
+    "www.etnews.com/2*",                # 전자신문 — 기사 URL이 연도로 시작하는 숫자 ID
+    "www.bloter.net/news/*",            # 블로터 — 한국 CMS 공통 형태
 ]
 
 SITE_EXCLUDE_PATTERNS = [
@@ -141,6 +147,8 @@ SITE_EXCLUDE_PATTERNS = [
     "edu.donga.com/news/articleList.html*",
     "www.insidehighered.com/*/author/*",
     "www.edweek.org/*/author/*",
+    "www.bloter.net/news/articleList.html*",
+    "www.etnews.com/*/section*",
 ]
 
 # 위 include 패턴에서 순수 도메인만 뽑아 Tavily include_domains(검색 범위
@@ -156,10 +164,13 @@ SITE_DOMAINS = [
     "edu.donga.com",
     "insidehighered.com",
     "edweek.org",
+    "etnews.com",
+    "bloter.net",
 ]
 
 # 사이트별 언어 — 어느 search_terms_* 목록을 쓸지 결정한다(2026-08-13 추가).
-KOREAN_DOMAINS = {"itworld.co.kr", "aitimes.com", "news.hada.io", "edpl.co.kr", "edu.donga.com"}
+KOREAN_DOMAINS = {"itworld.co.kr", "aitimes.com", "news.hada.io", "edpl.co.kr",
+                  "edu.donga.com", "etnews.com", "bloter.net"}
 ENGLISH_DOMAINS = {"techcrunch.com", "askedtech.com", "techmeme.com",
                    "insidehighered.com", "edweek.org"}
 
@@ -175,6 +186,8 @@ SITE_NAMES = {
     "edu.donga.com": "에듀동아",
     "insidehighered.com": "Inside Higher Ed",
     "edweek.org": "EdWeek",
+    "etnews.com": "전자신문",
+    "bloter.net": "블로터",
 }
 
 # 공용 기사 풀을 만드는 넓은 질의(006 마이그레이션 헤더 참고). **사용자가
@@ -188,8 +201,8 @@ SITE_NAMES = {
 #
 # 늘리면 사이트당 20건(RESULTS_PER_SITE) 상한이 질의 수만큼 늘어나고 크레딧도
 # 비례해 늘어난다(질의 1개당 사이트 6개 = 6크레딧/주).
-BROAD_QUERIES_KO = ["AI", "AI 기업"]
-BROAD_QUERIES_EN = ["AI", "AI startup"]
+BROAD_QUERIES_KO = ["AI", "인공지능"]
+BROAD_QUERIES_EN = ["AI", "enterprise AI"]
 
 
 def _url_path_for_matching(url: str) -> str:
