@@ -56,7 +56,7 @@ cp .env.example .env
 - `TAVILY_API_KEY` — [tavily.com](https://tavily.com)에서 발급(무료 티어, 카드 등록 불필요).
   화이트리스트 사이트 목록은 `collectors/search_engine.py`의
   `SITE_INCLUDE_PATTERNS`/`SITE_EXCLUDE_PATTERNS`에 코드로 관리(수정 시 이 파일만 고치면 됨).
-  현재 10곳 — 일반 테크 6곳 + **교육 매체 4곳**(아래 참고)
+  현재 **12곳** — 일반 테크 6곳 + 교육 매체 4곳 + 국내 IT 2곳(아래 참고)
 - `GEMINI_API_KEY` — 무료 티어. 동의어 병합에만 쓰고, 비어 있어도 파이프라인은
   죽지 않는다(단독 그룹 폴백)
 
@@ -192,6 +192,46 @@ TF-IDF는 찍기 기준선을 못 넘어(정확도 0.550 vs 0.567) `build_model`
 모델이 없어 최신순인 걸 모르면 추천 순위로 오해하고, 응답 길이 때문에 자른
 것을 "이게 전부"로 읽는다. 모르는 시장 이름을 물으면 빈 결과 대신 등록된
 시장 목록을 돌려준다.
+
+### 도커로 배포하기 (남에게 줄 때)
+
+받는 사람이 Python·가상환경·의존성을 만질 필요 없이 `docker run` 한 줄이면 된다.
+
+```bash
+docker build -t tech-monitoring-mcp .
+```
+
+Claude Desktop 등의 MCP 설정에 이렇게 등록한다(`DATABASE_URL`은 컨테이너에
+굽지 않고 실행할 때 넘긴다 — 이미지에 비밀번호가 들어가면 안 된다):
+
+```json
+{
+  "mcpServers": {
+    "tech-monitoring": {
+      "command": "docker",
+      "args": ["run", "--rm", "-i",
+               "-e", "DATABASE_URL=postgresql://...",
+               "tech-monitoring-mcp"]
+    }
+  }
+}
+```
+
+**이미지에 머신러닝 라이브러리를 넣지 않는다.** MCP 서버는 읽기 전용이라
+분류기를 돌리지 않는다 — 판단은 파이프라인이 미리 끝내 점수로 저장해둔다.
+그래서 psycopg + mcp만 들어가고 **274MB**에 머문다(프로젝트 전체를 설치하면
+streamlit·scikit-learn까지 딸려와 쓰지도 않을 것으로 몇 배가 된다). 같은 이유로
+`pip install .` 대신 소스만 복사하고 `PYTHONPATH`로 잡는다.
+
+> **mcp 버전 상한(`<2`)은 필수다.** 2.0.0에서 `mcp.server.fastmcp`가 사라져
+> `server.py`의 import가 깨진다. 실측 2026-08-19: `>=1.2`로 열어뒀더니 로컬
+> `.venv`(1.29.0)는 멀쩡한데 **새로 만든 컨테이너만 2.0.0을 받아** 즉시
+> 종료됐다 — 새 환경에서만 터지는 종류의 함정이라 `pyproject.toml`에도 같은
+> 상한을 넣었다.
+
+실측 검증(2026-08-19): 컨테이너 안에 torch·scikit-learn·streamlit이 없는 것을
+확인하고, 실제 stdio 클라이언트를 붙여 핸드셰이크 → 도구 4개 → `get_status`
+(기사 415건·라벨 139건) → `get_articles` 호출까지 통과.
 
 저장소 루트의 `.mcp.json`에 이미 설정돼 있어 Claude Code에서는 그대로 잡힌다.
 Claude Desktop 등 다른 클라이언트는 아래처럼 등록한다(`DATABASE_URL`은 `.env`
