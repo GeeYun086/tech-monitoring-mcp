@@ -124,6 +124,16 @@ SITE_INCLUDE_PATTERNS = [
     # 소식이 비었다. 후보 검증에서 두 곳 다 국내 기업·AX 기사가 실제로 나왔다.
     "www.etnews.com/2*",                # 전자신문 — 기사 URL이 연도로 시작하는 숫자 ID
     "www.bloter.net/news/*",            # 블로터 — 한국 CMS 공통 형태
+    # 국내 IT 매체 5곳 추가(2026-08-24, 담당자 요청 — "중요 뉴스 수집 가능한
+    # 좋은 사이트" 확대). 패턴은 각 사이트 실제 기사 URL을 확인해서 뽑았다.
+    # fnmatch에서 "?"는 와일드카드(임의의 문자 1개)라 물음표가 든 쿼리스트링
+    # ("?no=", "?idxno=")은 리터럴로 매치되게 [?]로 이스케이프해야 한다 —
+    # 안 하면 "?" 앞뒤 아무 글자에나 걸려 화이트리스트가 새는 사고가 난다.
+    "www.zdnet.co.kr/view/[?]no=*",              # ZDNet Korea
+    "www.ddaily.co.kr/page/view/*",              # 디지털데일리
+    "byline.network/[0-9][0-9][0-9][0-9]/[0-9][0-9]/*",  # 바이라인네트워크 — /YYYY/MM/ 형태
+    "www.digitaltoday.co.kr/news/articleView.html[?]idxno=*",  # 디지털투데이
+    "www.techm.kr/news/articleView.html[?]idxno=*",             # 테크M
 ]
 
 SITE_EXCLUDE_PATTERNS = [
@@ -149,6 +159,22 @@ SITE_EXCLUDE_PATTERNS = [
     "www.edweek.org/*/author/*",
     "www.bloter.net/news/articleList.html*",
     "www.etnews.com/*/section*",
+    # 새로 추가한 5곳의 목록/카테고리 페이지. include 패턴이 이미 기사 전용
+    # 경로만 좁혀 잡고 있어 사실 대부분 도달 불가능하지만(예: ddaily의 목록
+    # 경로 "/ai"는 애초에 include의 "/page/view/*"와 안 겹친다), 다른
+    # 사이트들과 같은 이중 방어 관례를 맞춘다.
+    "www.zdnet.co.kr/news/*",
+    "www.zdnet.co.kr/newskey/*",
+    "www.zdnet.co.kr/column/*",
+    "www.zdnet.co.kr/photo/*",
+    "www.ddaily.co.kr/ai*",
+    "www.ddaily.co.kr/news*",
+    "www.ddaily.co.kr/industry*",
+    "www.ddaily.co.kr/enterprise*",
+    "byline.network/category/*",
+    "byline.network/special-report/*",
+    "www.digitaltoday.co.kr/news/articleList.html[?]*",
+    "www.techm.kr/news/articleList.html[?]*",
 ]
 
 # 위 include 패턴에서 순수 도메인만 뽑아 Tavily include_domains(검색 범위
@@ -166,11 +192,21 @@ SITE_DOMAINS = [
     "edweek.org",
     "etnews.com",
     "bloter.net",
+    # 국내 IT 매체 5곳(2026-08-24 추가) — 담당자가 URL 패턴까지 확인한
+    # 화이트리스트. 전부 AI 기사를 꾸준히 다루는 전문지다(위 include 패턴
+    # 주석 참고).
+    "zdnet.co.kr",
+    "ddaily.co.kr",
+    "byline.network",
+    "digitaltoday.co.kr",
+    "techm.kr",
 ]
 
 # 사이트별 언어 — 어느 search_terms_* 목록을 쓸지 결정한다(2026-08-13 추가).
 KOREAN_DOMAINS = {"itworld.co.kr", "aitimes.com", "news.hada.io", "edpl.co.kr",
-                  "edu.donga.com", "etnews.com", "bloter.net"}
+                  "edu.donga.com", "etnews.com", "bloter.net",
+                  "zdnet.co.kr", "ddaily.co.kr", "byline.network",
+                  "digitaltoday.co.kr", "techm.kr"}
 ENGLISH_DOMAINS = {"techcrunch.com", "askedtech.com", "techmeme.com",
                    "insidehighered.com", "edweek.org"}
 
@@ -188,6 +224,11 @@ SITE_NAMES = {
     "edweek.org": "EdWeek",
     "etnews.com": "전자신문",
     "bloter.net": "블로터",
+    "zdnet.co.kr": "ZDNet Korea",
+    "ddaily.co.kr": "디지털데일리",
+    "byline.network": "바이라인네트워크",
+    "digitaltoday.co.kr": "디지털투데이",
+    "techm.kr": "테크M",
 }
 
 # 공용 기사 풀을 만드는 넓은 질의(006 마이그레이션 헤더 참고). **사용자가

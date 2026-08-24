@@ -573,4 +573,41 @@ def test_education_media_get_queries_in_the_right_language():
     assert search_engine.broad_queries_for_domain("edpl.co.kr") == search_engine.BROAD_QUERIES_KO
     assert search_engine.broad_queries_for_domain("edu.donga.com") == search_engine.BROAD_QUERIES_KO
     assert search_engine.broad_queries_for_domain("edweek.org") == search_engine.BROAD_QUERIES_EN
+
+
+# ---- 국내 IT 매체 5곳(2026-08-24 추가) ----
+
+@pytest.mark.parametrize("url", [
+    "https://www.zdnet.co.kr/view/?no=20260824140714",
+    "https://www.ddaily.co.kr/page/view/2026082413563146447",
+    "https://byline.network/2026/08/ox-alpha/",
+    "https://byline.network/2026/08/21_20192873/",
+    "https://www.digitaltoday.co.kr/news/articleView.html?idxno=123456",
+    "https://www.techm.kr/news/articleView.html?idxno=654321",
+])
+def test_new_korean_media_article_urls_pass(url):
+    """2026-08-24 추가 5곳의 실제 기사 URL 형태(담당자 요청으로 조사·확인).
+    "?"는 fnmatch에서 와일드카드라 이스케이프([?])를 빠뜨리면 이 테스트가
+    먼저 깨진다."""
+    assert search_engine.is_allowed_url(url)
+
+
+@pytest.mark.parametrize("url", [
+    "https://www.zdnet.co.kr/news/?lstcode=abc",
+    "https://www.zdnet.co.kr/newskey/?lstcode=인공지능",
+    "https://www.zdnet.co.kr/column/?lstcode=abc",
+    "https://www.ddaily.co.kr/ai",
+    "https://www.ddaily.co.kr/news",
+    "https://byline.network/category/article/ai/",
+    "https://www.digitaltoday.co.kr/news/articleList.html?sc_section_code=S1N10",
+    "https://www.techm.kr/news/articleList.html?sc_serial_code=SRN7",
+])
+def test_new_korean_media_list_pages_are_blocked(url):
+    assert not search_engine.is_allowed_url(url)
+
+
+def test_new_korean_media_get_korean_queries():
+    for domain in ("zdnet.co.kr", "ddaily.co.kr", "byline.network",
+                   "digitaltoday.co.kr", "techm.kr"):
+        assert search_engine.broad_queries_for_domain(domain) == search_engine.BROAD_QUERIES_KO
     assert search_engine.broad_queries_for_domain("insidehighered.com") == search_engine.BROAD_QUERIES_EN
