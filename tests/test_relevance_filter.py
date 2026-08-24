@@ -191,10 +191,11 @@ def test_judge_keyword_uses_classifier_when_model_is_available(monkeypatch):
     assert saved == [({0}, [0.9, 0.2])]   # 낮은 점수도 버리지 않고 함께 저장(007)
 
 
-def test_score_with_classifier_returns_probabilities_with_market_keyword(monkeypatch):
-    """분류기 입력은 학습 때와 같은 형식이어야 한다 — 고정 키워드가 함께
-    들어가야 한다. 그리고 **확률을 그대로** 돌려줘야 한다(007) — 여기서 잘라
-    집합만 넘기면 순위 정보가 사라진다."""
+def test_score_with_classifier_returns_probabilities(monkeypatch):
+    """분류기 입력은 학습 때와 같은 형식이어야 한다 — 제목+요약만(2026-08-24,
+    시장 구분 제거로 고정 키워드는 더 이상 안 들어간다). 그리고 **확률을
+    그대로** 돌려줘야 한다(007) — 여기서 잘라 집합만 넘기면 순위 정보가
+    사라진다."""
     seen = {}
 
     def fake_predict_proba(bundle, rows):
@@ -211,7 +212,7 @@ def test_score_with_classifier_returns_probabilities_with_market_keyword(monkeyp
     )
 
     assert scores == [0.9, 0.49, 0.5]
-    assert all(r["fixed_keyword"] == "교육" for r in seen["rows"])
+    assert all("fixed_keyword" not in r for r in seen["rows"])
     assert seen["rows"][0]["title"] == "가"
 
 

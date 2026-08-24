@@ -50,6 +50,12 @@ class _FakeCursor:
                     if r["fixed_keyword_id"] == fixed_keyword_id
                     and r["labeled_by"] == labeled_by]
             self._set(("url_norm",), rows)
+        elif "SELECT url_norm, label FROM article_labels" in query:
+            fixed_keyword_id, labeled_by = params
+            rows = [r for r in self._labels()
+                    if r["fixed_keyword_id"] == fixed_keyword_id
+                    and r["labeled_by"] == labeled_by]
+            self._set(("url_norm", "label"), rows)
         elif "count(*) FROM article_labels" in query:
             # WHERE 절이 조건에 따라 붙었다 말았다 하므로 질의 문자열을 보고
             # params를 순서대로 꺼낸다(labeling.count_labels와 같은 순서).
@@ -374,6 +380,37 @@ def test_label_period_falls_back_to_run_week_without_publication_date():
 
     (params,) = conn.inserts
     assert params[9] == date(2026, 8, 17)
+
+
+# --- 인라인 👍/👎 상태 조회(2026-08-24, 🏷️ 라벨링 탭 대체) -----------------
+
+def test_fetch_label_map_returns_url_norm_to_label():
+    """인라인 버튼이 지금 상태(토글 대상)를 알아야 한다 —
+    fetch_labeled_url_norms는 있다/없다만 알려줘서 부족하다."""
+    conn = _FakeConn(article_labels=[
+        _label_row("u1", label="relevant"),
+        _label_row("u2", label="irrelevant"),
+    ])
+
+    assert labeling.fetch_label_map(conn, fixed_keyword_id=1) == {
+        "u1": "relevant", "u2": "irrelevant",
+    }
+
+
+def test_fetch_label_map_scoped_to_keyword_and_labeler():
+    conn = _FakeConn(article_labels=[
+        _label_row("mine", label="relevant"),
+        _label_row("other-person", label="relevant", labeled_by="동료"),
+        _label_row("other-market", label="relevant", fixed_keyword_id=2),
+    ])
+
+    assert labeling.fetch_label_map(conn, fixed_keyword_id=1) == {"mine": "relevant"}
+
+
+def test_fetch_label_map_empty_when_nothing_labeled():
+    conn = _FakeConn(article_labels=[])
+
+    assert labeling.fetch_label_map(conn, fixed_keyword_id=1) == {}
 
 
 # --- 라벨 검토·수정(작업 5) -------------------------------------------------

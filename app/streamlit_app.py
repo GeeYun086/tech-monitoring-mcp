@@ -4,38 +4,49 @@
 레이아웃만 담당한다(v1 ax-dashboard 스킬에서 이어받은 원칙, SKILL.md는
 삭제됐지만 "숫자 계산은 스크립트가, 화면은 레이아웃만" 이유는 그대로 유효).
 
-화면 구성:
-    1. 직접 검색(큐레이션 검색엔진 라이브 호출, DB에 저장 안 함)
-    2. 🏷️ 라벨링 탭 — 관련도 판단을 Gemini에서 로컬 분류기로 옮기기 위한
-       학습 데이터를 사람이 직접 쌓는 화면(2026-08-18 추가, tech_monitoring.
-       labeling). 한 번에 기사 하나만 보여주고 도움됨/도움 안 됨을 누르면
-       저장 후 다음 기사로 넘어간다 — 262건을 훑어야 해서 목록을 통째로
-       그리면 클릭마다 전체 재렌더가 걸리고 어디까지 했는지도 놓친다.
-       라벨을 저장하면 그 기사는 후보에서 빠지므로 rerun만으로 자연히
-       다음 기사가 나온다. 카드 아래 접힌 "라벨 검토 및 수정"에서 판단을
-       변경하거나 라벨을 취소할 수 있다(취소하면 후보 목록으로 복귀).
-    3. 📈 성능 탭 — 라벨을 정답지로 삼아 분류기를 채점한다(relevance_model).
-       라벨 수가 적을 때는 클래스 분포만 보여주고, 최소 기준을 넘으면 버튼을
-       눌러 측정한다 — 클릭마다 자동 학습하면 임베딩 모델 로드(수십 초)가
-       매번 걸려 라벨링 자체가 느려진다. 정확도는 항상 "찍기 기준선"과
-       나란히 보여준다(쏠린 라벨에서 정확도만 보면 착시가 생긴다).
-    4. 고정 키워드(모니터링 대상 시장) 탭
-       - 주간 이슈 기사(주요 콘텐츠) — top20 등으로 안 자르고 이번 주
-         수집분 전체를 보여준다(2026-08-13 담당자 확인 — 나중에 라벨링
-         작업에 쓸 예정이라 넉넉하게). 기사 풀은 시장과 무관한 하나이고
-         (006), **정렬만** 시장별 분류기 점수로 달라진다(007) — 점수가 낮은
-         기사도 목록에 남는다. 아직 모델이 없으면 최신순이고, 무엇으로
-         정렬됐는지 목록 위에 표시한다. 그 앞에 **국내 매체 우선** 정렬을
-         한 번 더 앞세운다(2026-08-24 담당자 피드백 — 해외 기사에 묻혀 국내
-         기사가 잘 안 보인다는 의견. dashboard_queries._sort_domestic_first,
-         국내/해외 판정은 collectors/search_engine.py의 KOREAN_DOMAINS 재사용).
-       - "이번 주 주요 키워드" 차트는 없앴다(2026-08-24 담당자 결정) —
-         대문자 시작 휴리스틱이라 품질이 낮은 채로 방치돼 있었는데, 그
-         목록을 만들려고 파이프라인이 매주 Gemini 동의어 병합을 부르는
-         비용이 품질 대비 아깝다는 판단. pipeline_v2.py에서도
-         merge_keywords 단계를 뺐다 — market_keywords 테이블이 더 이상
-         채워지지 않는다(MCP get_keywords 툴은 남아 있지만 이제 빈 결과를
-         돌려준다).
+화면 구성(2026-08-24 대개편 — 마켓 3개 분할 제거):
+    1. "기사" 탭(기본 화면) — 이번 주 공용 기사 풀 전체를 보여준다(006,
+       top20 등으로 안 자르는 원칙은 그대로, 2026-08-13 담당자 확인).
+       **마켓(고정 키워드) 3개로 나눠 보던 걸 없앴다** — 수집 자체가 애초에
+       시장과 무관한 공용 풀이라(collectors/search_engine.py의 "공용 기사
+       풀" 방식) 3개로 쪼개 보는 게 의미 없다는 담당자 판단. DB의
+       fixed_keywords는 스키마를 안 건드리려고 1개만 active로 남겨뒀다
+       (scripts/manage_fixed_keywords.py로 조정 가능하지만, 지금 설계는
+       "여러 마켓"을 다시 켜는 걸 상정하지 않는다).
+       - 정렬: **국내 매체 우선**(2026-08-24 담당자 피드백 — 해외 기사에
+         묻혀 국내 기사가 잘 안 보인다는 의견. dashboard_queries.
+         _sort_domestic_first, 국내/해외 판정은 collectors/search_engine.py
+         의 KOREAN_DOMAINS 재사용) 다음 분류기 점수(모델 없으면 최신순) —
+         무엇으로 정렬됐는지 목록 위에 표시한다.
+       - **키워드 검색**(2026-08-24) — 문장 임베딩 코사인 유사도로 찾는다.
+         완전히 같은 단어가 아니어도(동의어·다른 표현) 걸린다. 예전
+         "🔍 직접 검색"(Tavily 라이브 호출)과 "키워드로 기사 필터링"
+         드롭다운(market_keywords 기반, 더는 안 채워짐)을 이걸로 대체했다
+         — 담당자 판단: 이미 모아둔 이번 주 기사 안에서 찾는 것으로 충분
+         하고, 매 검색마다 API 크레딧을 쓰는 라이브 호출은 필요 없다.
+       - 각 기사 행에 👍/👎 인라인 버튼 — 262건을 한 번에 하나씩 강제로
+         훑던 예전 🏷️ 라벨링 탭을 없애고(비효율적이라는 담당자 피드백)
+         기사를 먼저 보여주고 읽다가 필요한 것만 누르게 한다. 저장 로직은
+         예전과 동일하게 tech_monitoring.labeling을 그대로 쓴다 — 바뀐 건
+         "언제·어디서 누르는가"뿐이다. 같은 버튼을 다시 누르면 라벨이
+         취소되고(labeling.delete_label), 반대 버튼을 누르면 뒤집힌다
+         (labeling.save_label의 UPSERT). 버튼을 누를 때마다
+         auto_retrain.maybe_retrain이 불려 라벨 5건마다(기본값) 분류기를
+         자동으로 다시 학습하고 이번 주 순위를 갱신한다(auto_retrain.py
+         모듈 docstring 참고 — 클릭마다 재학습하지 않는 이유도 거기 있다).
+       - 분류기는 더 이상 "이 기사가 이 시장에 도움되는가"가 아니라
+         "일반적으로 도움되는가" 하나로 판단한다(relevance_model.build_text
+         — 시장 이름을 더는 입력에 안 붙인다). 마켓 3개에 걸쳐 있던 예전
+         라벨은 버리지 않고 그대로 하나의 학습 데이터로 합쳐 쓴다.
+    2. 📈 성능 탭(보조 지표라 뒤로) — 라벨을 정답지로 삼아 분류기를
+       채점한다(relevance_model). 라벨 수가 적을 때는 클래스 분포만
+       보여주고, 최소 기준을 넘으면 버튼을 눌러 측정한다. 정확도는 항상
+       "찍기 기준선"과 나란히 보여준다(쏠린 라벨에서 정확도만 보면 착시가
+       생긴다).
+    "이번 주 주요 키워드" 차트는 없앴다(2026-08-24 담당자 결정) — 대문자
+    시작 휴리스틱이라 품질이 낮은 채로 방치돼 있었는데, 그 목록을 만들려고
+    파이프라인이 매주 Gemini 동의어 병합을 부르는 비용이 품질 대비 아깝다는
+    판단. pipeline_v2.py에서도 merge_keywords 단계를 뺐다.
 
 DB 연결은 .env(DATABASE_URL)에서 읽는다(config.py 경유).
 
@@ -45,13 +56,14 @@ DB 연결은 .env(DATABASE_URL)에서 읽는다(config.py 경유).
 import psycopg
 import streamlit as st
 
+from tech_monitoring import auto_retrain
 from tech_monitoring import dashboard_queries as dq
 from tech_monitoring import labeling
 from tech_monitoring import relevance_model
 from tech_monitoring.analysis.relevance_filter import judge_all
-from tech_monitoring.collectors.search_engine import search_once
 from tech_monitoring.db.connection import get_connection
 from tech_monitoring.db.weekly_run import get_run_period, week_bounds_for
+from tech_monitoring.utils.url_normalize import normalize_url
 
 st.set_page_config(page_title="AX 시장 모니터링", layout="wide")
 
@@ -104,41 +116,6 @@ def _render_run_banner(conn, run: dict | None) -> None:
         )
 
 
-def _render_search_box() -> None:
-    st.subheader("🔍 직접 검색")
-    query = st.text_input(
-        "큐레이션 검색엔진에서 바로 검색(이번 주 데이터와 무관 — 매 요청 라이브 호출)",
-        placeholder="예: OpenAI 기업 도입 사례",
-    )
-    if not query:
-        return
-    results = search_once(query)
-    if not results:
-        st.info("검색 결과가 없거나 검색 설정(TAVILY_API_KEY)이 비어 있습니다.")
-        return
-    for item in results:
-        st.markdown(
-            f"**[{item.get('title', '(제목 없음)')}]({item.get('link', '')})**  \n"
-            f"{item.get('displayLink', '')} — {item.get('snippet', '')}"
-        )
-
-
-def _render_article_list(articles: list[dict]) -> None:
-    if not articles:
-        st.info("해당하는 기사가 없습니다.")
-        return
-    for a in articles:
-        published = a["published_at"].strftime("%Y-%m-%d") if a.get("published_at") else ""
-        meta = " · ".join(p for p in (a.get("source_domain"), published) if p)
-        st.markdown(
-            f"- [{a['title']}]({a['url']})"
-            + (f"  \n  <span style='color:gray'>{meta}</span>" if meta else ""),
-            unsafe_allow_html=True,
-        )
-        if a.get("snippet"):
-            st.caption(a["snippet"])
-
-
 _ALL_WEEKS = "전체 기간"
 _UNDATED_LABEL = "날짜 미상"
 
@@ -178,128 +155,115 @@ def _select_week(conn, run_id: int, key: str):
     return options[label]
 
 
-def _render_labeling_progress(conn, fixed_keyword: dict, remaining: int, scoped: bool = False) -> None:
-    counts = labeling.count_labels(conn, fixed_keyword["id"])
-    done = counts["total"]
-    total = done + remaining
-
-    st.progress(done / total if total else 1.0)
-    # 주차를 골랐으면 남은 후보는 그 주 기준이라 진행률 분모와 단위가 다르다 —
-    # 같은 문장으로 적으면 "완료 30 / 91건"처럼 읽혀 오해를 부른다.
-    remaining_label = "선택한 주 남은 후보" if scoped else "남은 후보"
-    st.caption(
-        f"**{fixed_keyword['keyword']}** — 라벨 완료 {done}건 "
-        f"(도움됨 {counts['relevant']} · 도움 안 됨 {counts['irrelevant']}) · "
-        f"{remaining_label} {remaining}건"
-    )
-
-
-def _render_labeling_card(conn, article: dict, fixed_keyword: dict, period_start) -> None:
-    published = article["published_at"].strftime("%Y-%m-%d") if article.get("published_at") else "날짜 미상"
-    st.markdown(f"### [{article['title']}]({article['url']})")
-    st.caption(f"{article.get('source_domain') or '출처 미상'} · {published}")
-    # 저장은 원문 전체(labeling.py 참고), 화면은 대시보드와 같은 길이로 자른다.
-    if article.get("snippet"):
-        st.write(dq.truncate_summary(article["snippet"], max_chars=400))
-
-    st.write("")
-    yes, no, skip = st.columns(3)
-
-    def _save(label: str) -> None:
-        labeling.save_label(conn, fixed_keyword["id"], article, label, period_start)
-
-    # key에 url_norm을 넣어 기사가 바뀌면 버튼도 새 위젯이 되게 한다 — 같은
-    # key를 재사용하면 Streamlit이 이전 클릭 상태를 물려받아 연속 저장이 난다.
-    key = f"{fixed_keyword['id']}_{article['url_norm']}"
-    if yes.button("도움이 되는 기사예요", key=f"yes_{key}", use_container_width=True, type="primary"):
-        _save(labeling.LABEL_RELEVANT)
-        st.rerun()
-    if no.button("도움이 되지 않는 기사예요", key=f"no_{key}", use_container_width=True):
-        _save(labeling.LABEL_IRRELEVANT)
-        st.rerun()
-    if skip.button("판단 보류", key=f"skip_{key}", use_container_width=True):
-        # 저장하지 않고 이번 세션에서만 숨긴다 — 판단이 안 서는 걸 억지로
-        # 라벨하면 학습 데이터가 오염된다. 새로고침하면 다시 나온다.
-        st.session_state.setdefault("labeling_skipped", set()).add(article["url_norm"])
-        st.rerun()
-
-
-def _render_labeling_tab(conn, run_id: int, fixed_keywords: list[dict], period_start) -> None:
-    st.subheader("🏷️ 라벨링")
-    st.caption(
-        "이 기사가 해당 시장을 모니터링하는 데 **도움이 되는지** 선택해 주세요. "
-        "여기에 쌓인 판단이 그대로 관련도 분류기의 학습 데이터가 됩니다 "
-        "(같은 기사라도 시장이 다르면 판단이 달라질 수 있어 시장별로 따로 여쭙니다)."
-    )
-
-    keyword_names = [kw["keyword"] for kw in fixed_keywords]
-    selected = st.selectbox("어느 시장 기준으로 라벨링할까요?", keyword_names, key="labeling_keyword")
-    fixed_keyword = next(kw for kw in fixed_keywords if kw["keyword"] == selected)
-
-    week_start = _select_week(conn, run_id, key="labeling_week")
-    candidates = labeling.fetch_unlabeled_candidates(
-        conn, run_id, fixed_keyword["id"], week_start=week_start,
-    )
-    skipped = st.session_state.get("labeling_skipped", set())
-    pending = [c for c in candidates if c["url_norm"] not in skipped]
-
-    _render_labeling_progress(conn, fixed_keyword, len(candidates), scoped=week_start is not None)
-
-    if not pending:
-        if skipped and candidates:
-            st.info(f"보류한 {len(candidates)}건만 남았습니다. 새로고침하면 다시 볼 수 있습니다.")
-        elif week_start is not None:
-            st.success("선택한 주는 라벨링이 끝났습니다. 위에서 다른 주나 시장을 선택하세요.")
-        else:
-            st.success("이 시장은 라벨링이 끝났습니다. 위에서 다른 시장을 선택하세요.")
-    else:
-        st.divider()
-        _render_labeling_card(conn, pending[0], fixed_keyword, period_start)
-
-    _render_label_review(conn, fixed_keyword)
-
-
 _LABEL_BADGES = {
     labeling.LABEL_RELEVANT: "👍 도움됨",
     labeling.LABEL_IRRELEVANT: "👎 도움 안 됨",
 }
 
 
-def _render_label_review(conn, fixed_keyword: dict) -> None:
-    """방금 매긴 라벨을 되돌아보고 고치는 자리.
+def _apply_retrain_feedback(retrain_result: dict | None) -> None:
+    """auto_retrain.maybe_retrain의 결과를 짧은 토스트로 알려준다.
 
-    카드를 빠르게 넘기는 작업이라 오클릭이 생기는데, 그 판단이 그대로 학습
-    데이터가 되므로 되돌릴 수단이 필요하다. 접어두는 이유는 라벨링 흐름을
-    방해하지 않기 위해서다 — 기본 작업은 위쪽 카드 하나에 집중한다.
-    """
-    recent = labeling.fetch_recent_labels(conn, fixed_keyword["id"])
-    if not recent:
+    None(문턱 안 넘음)이면 조용히 넘어간다 — 라벨 저장 자체는 이미 끝났고,
+    "아직 재학습할 때가 아니다"는 매번 알릴 정보가 아니다."""
+    if retrain_result is None:
+        return
+    if retrain_result["trained"]:
+        st.toast(
+            f"라벨이 쌓여 분류기를 다시 학습했습니다({retrain_result['method']}, "
+            f"F1 {retrain_result['metrics']['f1']:.3f}) — 이번 주 순위에 반영됐습니다.",
+            icon="🔄",
+        )
+    else:
+        st.toast("라벨은 저장했지만 아직 찍기 기준선을 넘지 못해 순위는 그대로입니다.", icon="ℹ️")
+
+
+_FEEDBACK_PAGE_SIZE = 30
+
+
+def _render_feedback_article_list(
+    conn, fixed_keyword: dict, articles: list[dict], period_start,
+) -> None:
+    """기사 목록 + 행마다 인라인 👍/👎(2026-08-24, 🏷️ 라벨링 탭 대체).
+
+    저장 자체는 예전과 똑같이 tech_monitoring.labeling을 그대로 쓴다 —
+    get_pool_articles가 돌려주는 행엔 없는 url_norm·source_table만 여기서
+    채워 넣는다(labeling.save_label이 요구하는 모양, labeling.py 헤더 참고).
+
+    같은 버튼을 다시 누르면 취소(delete_label), 반대 버튼을 누르면
+    뒤집힌다(save_label의 UPSERT가 그대로 덮어쓴다) — 사람이 지금 상태를
+    보고 판단해야 하므로 fetch_label_map으로 미리 다 가져와 버튼 표시(type=
+    "primary")에 반영한다.
+
+    **"더 보기" 페이지네이션(2026-08-24 실사용 중 발견)**: 기사마다 버튼을
+    2개씩 그리면 시장 하나(최대 415건)만 해도 위젯이 830개를 넘는다.
+    st.tabs를 segmented_control로 바꿔 시장 3개 동시 렌더는 막았지만
+    (위 main() 참고), 시장 **하나**의 830개 위젯만으로도 첫 클릭 직후
+    커넥션이 맛이 가서 그다음 클릭부터 반응이 없는 걸 실사용 중 확인했다
+    (스피너조차 안 뜸 — 요청이 서버에 닿지도 못한다는 뜻). "전체 안 자르고
+    보여준다" 원칙(README)은 **데이터**에 대한 것이지 "동시에 살아있는
+    위젯 개수"에 대한 게 아니라고 보고, 화면엔 한 번에 _FEEDBACK_PAGE_SIZE
+    건만 위젯으로 그리고 "더 보기"로 이어 붙인다 — 다 보려면 몇 번 눌러야
+    하지만 데이터 자체는 여전히 전부 도달 가능하다."""
+    if not articles:
+        st.info("해당하는 기사가 없습니다.")
         return
 
-    with st.expander(f"✅ 라벨 검토 및 수정 (최근 {len(recent)}건)", expanded=False):
-        st.caption(
-            "최근에 판단한 순서로 표시됩니다. 판단을 변경하거나, 라벨을 취소해 "
-            "해당 기사를 후보 목록으로 되돌릴 수 있습니다."
+    state_key = f"feedback_visible_{fixed_keyword['id']}"
+    visible = st.session_state.get(state_key, _FEEDBACK_PAGE_SIZE)
+
+    label_map = labeling.fetch_label_map(conn, fixed_keyword["id"])
+
+    for a in articles[:visible]:
+        url_norm = normalize_url(a["url"])
+        current = label_map.get(url_norm)
+
+        published = a["published_at"].strftime("%Y-%m-%d") if a.get("published_at") else ""
+        meta = " · ".join(p for p in (a.get("source_domain"), published) if p)
+
+        text_col, up_col, down_col = st.columns([10, 1, 1])
+        text_col.markdown(
+            f"- [{a['title']}]({a['url']})"
+            + (f"  \n  <span style='color:gray'>{meta}</span>" if meta else ""),
+            unsafe_allow_html=True,
         )
-        for row in recent:
-            published = row["published_at"].strftime("%Y-%m-%d") if row.get("published_at") else "날짜 미상"
-            text, flip, cancel = st.columns([6, 2, 1.4])
-            text.markdown(
-                f"{_LABEL_BADGES.get(row['label'], row['label'])} · [{row['title']}]({row['url']})  \n"
-                f"<span style='color:gray'>{row.get('source_domain') or '출처 미상'} · {published}</span>",
-                unsafe_allow_html=True,
-            )
-            key = f"{fixed_keyword['id']}_{row['url_norm']}"
-            opposite = (
-                labeling.LABEL_IRRELEVANT if row["label"] == labeling.LABEL_RELEVANT
-                else labeling.LABEL_RELEVANT
-            )
-            if flip.button(f"{_LABEL_BADGES[opposite]}으로 변경", key=f"flip_{key}", use_container_width=True):
-                labeling.update_label(conn, row["url_norm"], fixed_keyword["id"], opposite)
-                st.rerun()
-            if cancel.button("라벨 취소", key=f"del_{key}", use_container_width=True):
-                labeling.delete_label(conn, row["url_norm"], fixed_keyword["id"])
-                st.rerun()
+        if a.get("snippet"):
+            text_col.caption(a["snippet"])
+
+        # key에 url_norm을 넣어 기사가 바뀌면 버튼도 새 위젯이 되게 한다 —
+        # 같은 key를 재사용하면 Streamlit이 이전 클릭 상태를 물려받는다.
+        key = f"{fixed_keyword['id']}_{url_norm}"
+        clicked = None
+        if up_col.button(
+            "👍", key=f"up_{key}", use_container_width=True,
+            type="primary" if current == labeling.LABEL_RELEVANT else "secondary",
+            help="도움이 되는 기사예요(다시 누르면 취소)",
+        ):
+            clicked = labeling.LABEL_RELEVANT
+        if down_col.button(
+            "👎", key=f"down_{key}", use_container_width=True,
+            type="primary" if current == labeling.LABEL_IRRELEVANT else "secondary",
+            help="도움이 되지 않는 기사예요(다시 누르면 취소)",
+        ):
+            clicked = labeling.LABEL_IRRELEVANT
+
+        if clicked is not None:
+            with st.spinner("저장하는 중…"):
+                if clicked == current:
+                    labeling.delete_label(conn, url_norm, fixed_keyword["id"])
+                else:
+                    snapshot = {**a, "source_table": "collected_articles", "url_norm": url_norm}
+                    labeling.save_label(conn, fixed_keyword["id"], snapshot, clicked, period_start)
+                retrain_result = auto_retrain.maybe_retrain(conn)
+            _apply_retrain_feedback(retrain_result)
+            st.rerun()
+
+    if visible < len(articles):
+        remaining = len(articles) - visible
+        if st.button(f"더 보기({min(_FEEDBACK_PAGE_SIZE, remaining)}건 더, 남은 {remaining}건)",
+                     key=f"more_{state_key}"):
+            st.session_state[state_key] = visible + _FEEDBACK_PAGE_SIZE
+            st.rerun()
 
 
 @st.cache_resource(show_spinner=False)
@@ -420,7 +384,9 @@ def _render_performance_tab(conn) -> None:
     st.subheader("📈 성능")
     st.caption(
         "라벨링한 판단을 정답지로 삼아, 분류기가 **처음 보는 기사**를 얼마나 맞히는지 채점합니다. "
-        "라벨이 늘어날 때마다 다시 측정하면 개선 추이를 볼 수 있습니다."
+        "이번 주 기사 순위 자체는 시장 탭에서 👍/👎를 누를 때마다 "
+        f"{auto_retrain.RETRAIN_EVERY_N_LABELS}건마다 자동으로 갱신됩니다 — 여기서는 지금 당장 "
+        "정확한 지표(교차검증·시장별 분해)를 보고 싶을 때 눌러 확인하세요."
     )
 
     labels = labeling.fetch_all_labels(conn)
@@ -431,7 +397,7 @@ def _render_performance_tab(conn) -> None:
     if distribution["total"] < relevance_model.MIN_LABELS_TO_TRAIN:
         st.info(
             f"성능 측정에는 라벨이 최소 {relevance_model.MIN_LABELS_TO_TRAIN}건 필요합니다 "
-            f"(현재 {distribution['total']}건). '🏷️ 라벨링' 탭에서 계속 진행해 주세요."
+            f"(현재 {distribution['total']}건). 아래 시장 탭에서 기사에 👍/👎를 눌러 주세요."
         )
         return
 
@@ -495,34 +461,85 @@ def _render_performance_tab(conn) -> None:
     )
 
 
-def _render_keyword_tab(conn, run_id: int, fixed_keyword: dict) -> None:
-    # "이번 주 주요 키워드" 차트는 없앴지만(2026-08-24, 위 모듈 docstring 참고)
-    # canonical_phrase는 아래 "키워드로 기사 필터링" 드롭다운에 그대로 쓴다.
-    keywords = dq.get_market_keywords(conn, run_id, fixed_keyword["id"])
+@st.cache_data(show_spinner="기사 임베딩 계산 중… (같은 목록은 처음 검색할 때만, 몇 초 걸립니다)")
+def _pool_embeddings(cache_key: tuple, _articles: list[dict]):
+    """기사 목록을 문장 임베딩으로 미리 변환해 캐시한다.
 
+    **캐시 키는 run_id가 아니라 기사 URL 튜플이다(2026-08-24 버그 수정)** —
+    run_id만으로 캐시하면, 같은 run 안에서도 주차 선택(_select_week)에 따라
+    articles 길이가 달라지는 걸 못 잡아서(예: 전체 415건 보다가 특정 주만
+    골라 92건이 됨), 이전에 캐시된 415개짜리 임베딩을 그대로 돌려줘 아래
+    유사도 계산에서 길이가 안 맞아 IndexError가 났다(실사용 중 발견). URL
+    튜플로 잡으면 목록이 바뀔 때마다 정확히 다시 계산된다(articles 자체는
+    앞에 밑줄 — 리스트라 해시 불가, dashboard_queries.py의 다른 캐시
+    함수들과 같은 관례). 검색할 때마다 다시 인코딩하면 매번 몇 초씩
+    걸리는데, 이렇게 하면 같은 목록에 대한 첫 검색에만 비용을 치른다."""
+    from tech_monitoring.relevance_model import encode_texts
+
+    texts = [f"{a['title']} {a.get('snippet') or ''}".strip() for a in _articles]
+    return encode_texts(texts)
+
+
+def _search_by_keyword(
+    articles: list[dict], query: str, *, top_k: int = 50, min_similarity: float = 0.2,
+) -> list[dict] | None:
+    """자유 키워드와 뜻이 비슷한 기사를 찾는다(2026-08-24 — 고정 키워드
+    드롭다운 대신 도입. market_keywords가 더 이상 안 채워지기도 하고, 담당자
+    피드백대로 "정확히 일치 안 해도 관련 있으면" 찾아주는 쪽이 더 유용하다).
+
+    문자열 포함 검사(ILIKE)가 아니라 문장 임베딩 코사인 유사도를 쓴다 —
+    "생성형 AI"를 검색해도 "LLM", "챗봇" 같은 다른 표현의 기사까지 걸리게
+    하려는 목적이라 정확 일치로는 안 된다. sentence-transformers가 없으면
+    (선택 설치, pyproject의 [embedding] extra) None을 돌려줘 호출부가
+    "검색 기능을 못 쓴다"고 알리게 한다 — 조용히 빈 결과를 주면 "관련
+    기사가 없다"로 오해한다.
+    """
+    import numpy as np
+
+    try:
+        cache_key = tuple(a["url"] for a in articles)
+        doc_vecs = _pool_embeddings(cache_key, articles)
+        from tech_monitoring.relevance_model import encode_texts
+
+        query_vec = encode_texts([query])[0]
+    except ImportError:
+        return None
+
+    doc_norms = np.linalg.norm(doc_vecs, axis=1)
+    query_norm = np.linalg.norm(query_vec)
+    similarities = (doc_vecs @ query_vec) / (doc_norms * query_norm + 1e-9)
+
+    order = np.argsort(-similarities)
+    return [articles[i] for i in order if similarities[i] >= min_similarity][:top_k]
+
+
+def _render_keyword_tab(conn, run_id: int, fixed_keyword: dict, period_start) -> None:
     st.markdown("**주간 이슈 기사**")
     week_start = _select_week(conn, run_id, key=f"articles_week_{fixed_keyword['id']}")
-    options = ["(전체)"] + [k["canonical_phrase"] for k in keywords]
-    selected = st.selectbox(
-        "키워드로 기사 필터링", options, key=f"kw_select_{fixed_keyword['id']}",
-    )
 
-    # 006부터 기사는 시장과 무관한 공용 풀에서 온다 — 세 탭이 같은 목록을
-    # 보여주고, 시장별 순서는 분류기 점수가 붙으면 갈라진다(작업 3).
-    if selected == "(전체)":
-        articles = dq.get_pool_articles(
-            conn, run_id, fixed_keyword["id"], week_start=week_start,
-        )
-    else:
-        variant_phrases = next(
-            k["variant_phrases"] for k in keywords if k["canonical_phrase"] == selected
-        )
-        articles = dq.get_pool_articles_for_variants(
-            conn, run_id, variant_phrases, week_start=week_start,
-        )
+    # 006부터 기사는 시장과 무관한 공용 풀에서 온다.
+    articles = dq.get_pool_articles(conn, run_id, fixed_keyword["id"], week_start=week_start)
+
+    query = st.text_input(
+        "키워드로 검색(완전히 같은 단어가 아니어도 뜻이 비슷하면 찾아줍니다)",
+        key=f"kw_search_{fixed_keyword['id']}",
+        placeholder="예: 생성형 AI 도입 사례",
+    )
+    if query.strip():
+        matched = _search_by_keyword(articles, query.strip())
+        if matched is None:
+            st.info(
+                "검색 기능을 쓰려면 문장 임베딩 라이브러리가 필요합니다 — "
+                'pip install -e ".[embedding]"'
+            )
+        else:
+            articles = matched
+            st.caption(f"'{query.strip()}'와(과) 관련된 기사 {len(articles)}건 · 유사도순")
+            _render_feedback_article_list(conn, fixed_keyword, articles, period_start)
+            return
 
     st.caption(f"{len(articles)}건 · 정렬: {dq.describe_ordering(articles)}")
-    _render_article_list(articles)
+    _render_feedback_article_list(conn, fixed_keyword, articles, period_start)
 
 
 def main() -> None:
@@ -531,9 +548,6 @@ def main() -> None:
     conn = _conn()
     run = dq.get_latest_run(conn)
     _render_run_banner(conn, run)
-
-    _render_search_box()
-    st.divider()
 
     fixed_keywords = dq.get_fixed_keywords(conn)
     if not fixed_keywords:
@@ -545,20 +559,29 @@ def main() -> None:
     if run is None:
         return
 
-    # 라벨링을 맨 앞 탭에 둔다 — 지금 단계에서 매주 실제로 하는 작업이고,
-    # 키워드 탭들과 나란히 두면 어느 시장을 라벨링 중인지가 탭 선택과
-    # 뒤섞여 헷갈린다(라벨링 안에서 시장을 따로 고르게 했다).
     period_start, _period_end = get_run_period(conn, run["id"])
-    tabs = st.tabs(["🏷️ 라벨링", "📈 성능"] + [kw["keyword"] for kw in fixed_keywords])
 
-    with tabs[0]:
-        _render_labeling_tab(conn, run["id"], fixed_keywords, period_start)
-    with tabs[1]:
+    # st.tabs가 아니라 segmented_control인 이유(2026-08-24) — st.tabs는 보이지
+    # 않는 탭까지 매번 전부 다시 그린다. 기사 목록에 인라인 👍/👎가 붙은 뒤로
+    # 시장 하나당 최대 415건×2버튼=830개 위젯이라, 3개 시장을 한 rerun에 동시에
+    # 그리면(최대 2490개) 커넥션이 못 버티고 끊겨 마지막 순서 시장이 통째로 안
+    # 뜨는 걸 실사용 중 확인했다(교육 탭 — 렌더 순서상 항상 마지막이라 그 여파를
+    # 맞았다). segmented_control은 평범한 위젯이라 "선택된 것만" 아래에서 직접
+    # if로 분기해 계산하면 실제로는 한 번에 시장 하나 분량만 그려진다 — 화면에
+    # 보이는 게 하나뿐이라는 사실과도 맞고, "전체 안 자르고 보여준다" 원칙도
+    # 그대로 유지된다(그 하나의 시장 안에서는 여전히 전부 보여준다).
+    # 기사 목록이 기본 화면이라 앞에 둔다(2026-08-24 담당자 요청) — 성능은
+    # 보조 지표라 뒤로.
+    options = [kw["keyword"] for kw in fixed_keywords] + ["📈 성능"]
+    selected = st.segmented_control("보기", options, default=options[0], label_visibility="collapsed")
+    if not selected:          # single-select라 같은 항목을 다시 누르면 선택 해제된다
+        selected = options[0]
+
+    if selected == "📈 성능":
         _render_performance_tab(conn)
-
-    for tab, kw in zip(tabs[2:], fixed_keywords):
-        with tab:
-            _render_keyword_tab(conn, run["id"], kw)
+    else:
+        kw = next(k for k in fixed_keywords if k["keyword"] == selected)
+        _render_keyword_tab(conn, run["id"], kw, period_start)
 
 
 main()

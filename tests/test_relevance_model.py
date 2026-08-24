@@ -37,13 +37,14 @@ def _dataset(n=60, week=date(2026, 8, 10)):
 
 # --- 입력 구성 -------------------------------------------------------------
 
-def test_build_text_puts_market_keyword_first():
-    """관련도는 "기사 × 시장" 쌍의 속성이라 키워드가 입력에 들어가야 한다 —
-    빠지면 같은 기사에 붙은 서로 다른 정답이 모순 데이터가 된다."""
+def test_build_text_ignores_market_uses_title_and_snippet():
+    """시장 구분 없이 제목+요약만 본다(2026-08-24) — 수집 자체가 시장과
+    무관한 공용 풀이라 3개로 나눠 보는 게 의미 없다는 판단. fixed_keyword가
+    row에 남아 있어도(예전 라벨 그대로 재사용) 텍스트엔 안 들어간다."""
     text = rm.build_text(_label("교육", "AI 도입", "relevant", "u1"))
 
-    assert text.startswith("교육")
-    assert "AI 도입" in text
+    assert text == "AI 도입 요약"
+    assert "교육" not in text
 
 
 def test_build_text_survives_missing_snippet():

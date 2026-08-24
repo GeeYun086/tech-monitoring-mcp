@@ -11,6 +11,7 @@ Streamlit UI가 생기기 전까지 이 테이블을 직접 만지는 유일한 
     ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py deactivate "AX 시장"
     ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py activate "AX 시장"
     ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py remove "AX 시장"
+    ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py rename "AX 시장" "전체"
 
 set-terms(2026-08-13 추가): 실제 검색에 쓸 언어별 동의어 목록. keyword
 문자열 자체를 그대로 검색어로 쓰면 (1) 표현이 다르면 못 찾고 (2) 영어
@@ -75,6 +76,18 @@ def set_active(conn, keyword: str, active: bool) -> bool:
         return cur.fetchone() is not None
 
 
+def rename_keyword(conn, old: str, new: str) -> bool:
+    """표시 이름만 바꾼다(2026-08-24, 마켓 구분 제거 추가) — id는 그대로라
+    article_labels·article_keyword_relevance 등 기존 데이터와의 연결이
+    끊기지 않는다. 순수 화면 표시용 문자열 하나만 바뀐다."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE fixed_keywords SET keyword = %s WHERE keyword = %s RETURNING id",
+            (new, old),
+        )
+        return cur.fetchone() is not None
+
+
 def remove_keyword(conn, keyword: str) -> bool:
     """하드 삭제. search_results/market_keywords가 fixed_keyword_id를 참조하지만
     ON DELETE CASCADE가 없으므로(설정 삭제로 지난 수집 데이터가 조용히 같이 지워지면
@@ -117,6 +130,10 @@ def main() -> None:
     remove_parser = sub.add_parser("remove", help="완전 삭제(이번 주 수집 데이터가 이미 있으면 FK 위반으로 실패)")
     remove_parser.add_argument("keyword")
 
+    rename_parser = sub.add_parser("rename", help="표시 이름만 변경(id·기존 라벨·점수는 그대로 유지)")
+    rename_parser.add_argument("old_keyword")
+    rename_parser.add_argument("new_keyword")
+
     terms_parser = sub.add_parser("set-terms", help="언어별 실제 검색어(동의어) 목록 설정")
     terms_parser.add_argument("keyword")
     terms_parser.add_argument("--ko", default="", help="한국어 검색어, 쉼표로 구분")
@@ -145,6 +162,11 @@ def main() -> None:
                 print(f"'{args.keyword}'를 찾을 수 없음", file=sys.stderr)
                 sys.exit(1)
             print(f"삭제됨: {args.keyword}")
+        elif args.command == "rename":
+            if not rename_keyword(conn, args.old_keyword, args.new_keyword):
+                print(f"'{args.old_keyword}'를 찾을 수 없음", file=sys.stderr)
+                sys.exit(1)
+            print(f"이름 변경됨: {args.old_keyword} -> {args.new_keyword}")
         elif args.command == "set-terms":
             terms_ko = [t.strip() for t in args.ko.split(",") if t.strip()]
             terms_en = [t.strip() for t in args.en.split(",") if t.strip()]
