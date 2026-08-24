@@ -1,18 +1,23 @@
-"""v2 파이프라인 오케스트레이터 — 검색엔진 수집 → 키워드 후보추출 →
-Gemini 동의어 병합까지 정해진 순서로 한 번에 실행한다. v1의
-pipeline.py(README·개발계획서 Phase 5 안정화)와 같은 목적을 새 아키텍처
-(collectors/search_engine.py + analysis/keyword_extraction.py +
-analysis/keyword_merge.py)에 적용한 것 — v1이 완전히 정리되면 이 파일이
+"""v2 파이프라인 오케스트레이터 — 검색엔진 수집 → 시장별 관련도 점수까지
+정해진 순서로 한 번에 실행한다. v1의 pipeline.py(README·개발계획서 Phase 5
+안정화)와 같은 목적을 새 아키텍처(collectors/search_engine.py +
+analysis/keyword_extraction.py)에 적용한 것 — v1이 완전히 정리되면 이 파일이
 pipeline.py 자리를 대체할 예정이다.
+
+**merge_keywords 단계 제거(2026-08-24 담당자 결정)**: "이번 주 주요 키워드"
+화면이 품질 대비 가치가 낮은데(대문자 시작 휴리스틱 위에 Gemini 동의어
+병합만 얹은 정도), 그걸 만들려고 매주 Gemini를 호출하는 비용이 아깝다는
+판단. analysis/keyword_merge.py 모듈 자체는 남겨뒀다(테스트·v3 재사용
+지점) — 이 파이프라인에서 부르지만 않는다. 이제 market_keywords 테이블은
+더 이상 채워지지 않는다(MCP get_keywords 툴은 빈 결과를 돌려준다).
 
 순서 고정 이유:
     (매주 데이터 wipe) → 이번 주 run 시작 → 검색엔진 수집(사이트별 공용 풀)
-    → 시장별 관련도 점수(분류기) →
-        키워드 후보추출 + Gemini 동의어 병합(고정 키워드별, run 전체 한 번에)
-    수집이 끝나야 그 주 collected_articles가 확정되고, 그걸 기반으로 키워드
-    후보를 뽑아야 한다 — 순서가 바뀌면 지난주 데이터로 이번 주 키워드를
-    뽑는 사고가 난다(v1이 겪은 "본문 백필 누락" 사고와 같은 종류의 문제라
-    v1 pipeline.py처럼 순서를 코드로 고정해둔다).
+    → 시장별 관련도 점수(분류기)
+    수집이 끝나야 그 주 collected_articles가 확정되고, 그걸 기반으로 관련도를
+    판단해야 한다 — 순서가 바뀌면 지난주 데이터로 이번 주를 판단하는 사고가
+    난다(v1이 겪은 "본문 백필 누락" 사고와 같은 종류의 문제라 v1
+    pipeline.py처럼 순서를 코드로 고정해둔다).
 
 무료 DB 티어 유지 방침(db/migrations/001_market_keywords_schema.sql)에 따라
 reset_weekly_data()로 지난주 데이터를 통째로 비운 뒤 이번 주 run을 새로
@@ -36,8 +41,6 @@ run이 completed로 마감됐다(pipeline_report.py 헤더 주석 참고).
 import logging
 import time
 
-from tech_monitoring.analysis.keyword_extraction import fetch_pool_rows
-from tech_monitoring.analysis.keyword_merge import run_for_all_keywords
 from tech_monitoring.analysis.relevance_filter import judge_all
 from tech_monitoring.collectors.search_engine import collect_all
 from tech_monitoring.db.connection import get_connection
@@ -104,24 +107,13 @@ def _judge_relevance(run_id: int) -> dict:
         conn.close()
 
 
-def _merge_keywords(run_id: int) -> dict:
-    """키워드 후보를 공용 기사 풀에서 뽑는다(006부터) — 기본값인
-    search_results는 이제 수집되지 않으므로 fetch_rows를 명시해야 한다."""
-    conn = get_connection()
-    try:
-        return {"results": run_for_all_keywords(conn, run_id, fetch_rows=fetch_pool_rows)}
-    finally:
-        conn.close()
-
-
 def _stages(run_id: int, weeks=None) -> list[tuple[str, object]]:
-    # 매 호출 시점에 run_id를 바인딩 — 테스트에서 monkeypatch로 _collect/
-    # _merge_keywords 자체를 갈아끼울 수 있게 모듈 함수를 참조 형태로 감싼다
-    # (v1 pipeline.py와 동일 패턴).
+    # 매 호출 시점에 run_id를 바인딩 — 테스트에서 monkeypatch로 _collect
+    # 자체를 갈아끼울 수 있게 모듈 함수를 참조 형태로 감싼다(v1 pipeline.py와
+    # 동일 패턴).
     return [
         ("collect", lambda: _collect(run_id, weeks)),
         ("judge_relevance", lambda: _judge_relevance(run_id)),
-        ("merge_keywords", lambda: _merge_keywords(run_id)),
     ]
 
 

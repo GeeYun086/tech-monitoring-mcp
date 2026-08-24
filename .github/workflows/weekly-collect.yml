@@ -63,11 +63,12 @@ jobs:
       # 실패하면 종료 코드 1로 끝나 이 잡이 빨간불이 된다(pipeline_v2의
       # __main__ 참고) — 자동 실행은 로그를 사람이 안 보므로 종료 코드가
       # 유일한 신호다. 항목 하나라도 error면 실패로 센다.
+      # GEMINI_API_KEY는 더 이상 안 넘긴다(2026-08-24) — pipeline_v2에서
+      # merge_keywords 단계를 뺀 뒤로 이 파이프라인은 Gemini를 아예 안 부른다
+      # (judge_relevance는 로컬 분류기만 쓰고, allow_llm_fallback=False가
+      # 기본값이라 Gemini로 안 넘어간다).
       - name: 주간 수집 실행
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
-          # 동의어 병합에만 쓴다. 없거나 크레딧이 떨어져도 파이프라인은
-          # 죽지 않고 "전부 단독 그룹"으로 폴백한다(analysis/keyword_merge.py).
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python -m tech_monitoring.pipeline_v2

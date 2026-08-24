@@ -20,6 +20,12 @@ search_results (원본 기사 풀)
 market_keywords ("이번 주 주요 키워드" 최종 목록)
 ```
 
+**"이번 주 주요 키워드" 화면·이 Gemini 단계는 2026-08-24부로 `pipeline_v2`
+(주간 자동 수집)에서 뺐다** — 품질(대문자 시작 휴리스틱 기반) 대비 매주
+Gemini를 호출하는 비용이 아깝다는 담당자 판단. `analysis/keyword_merge.py`
+모듈 자체와 `pipeline_v3`(아래 "v2 vs v3 비교 실험", 자동 실행 아님)는
+그대로 남아 있다.
+
 관련도 판별 단계가 따로 없다 — 큐레이션된 화이트리스트 자체가 관련도를
 보장한다는 게 이 피벗의 핵심 전제다. "파급력"도 별도 스코어링 없이
 **언급량(doc_count) 자체가 신호**라는 더 단순한 모델을 쓴다(사건 단위
@@ -57,8 +63,9 @@ cp .env.example .env
   화이트리스트 사이트 목록은 `collectors/search_engine.py`의
   `SITE_INCLUDE_PATTERNS`/`SITE_EXCLUDE_PATTERNS`에 코드로 관리(수정 시 이 파일만 고치면 됨).
   현재 **12곳** — 일반 테크 6곳 + 교육 매체 4곳 + 국내 IT 2곳(아래 참고)
-- `GEMINI_API_KEY` — 무료 티어. 동의어 병합에만 쓰고, 비어 있어도 파이프라인은
-  죽지 않는다(단독 그룹 폴백)
+- `GEMINI_API_KEY` — **주간 자동 수집(`pipeline_v2`)은 2026-08-24부로 이 키를
+  쓰지 않는다.** `analysis/keyword_merge.py`를 단독 실행하거나 `pipeline_v3`
+  비교 실험을 돌릴 때만 필요(동의어 병합용, 비어 있어도 단독 그룹 폴백)
 
 ```bash
 ./.venv/Scripts/python.exe -m tech_monitoring.db.migrate   # 스키마 적용(db/migrations/)
@@ -186,7 +193,7 @@ TF-IDF는 찍기 기준선을 못 넘어(정확도 0.550 vs 0.567) `build_model`
 | `get_status` | 기준 기간·기사 수·주차별 건수·시장 목록·라벨 현황(+파이프라인 실패 사유) |
 | `get_markets` | 시장 목록과 시장별 라벨 진행 상황 |
 | `get_articles(market, limit)` | 한 시장의 기사 — **분류기 점수순**, 모델이 없으면 최신순 |
-| `get_keywords(market, limit)` | 한 시장의 주요 키워드(보조 지표) |
+| `get_keywords(market, limit)` | 한 시장의 주요 키워드(보조 지표) — 2026-08-24부로 파이프라인이 `market_keywords`를 더 이상 채우지 않아 빈 결과를 돌려준다 |
 
 응답에 **순서의 근거**(`ordering`)와 **전체 건수**(`total`)를 함께 담는다 —
 모델이 없어 최신순인 걸 모르면 추천 순위로 오해하고, 응답 길이 때문에 자른
@@ -384,7 +391,7 @@ Actions 탭에서 "주간 수집 → Run workflow"로 수동 실행도 된다.
 | --- | --- | --- |
 | `DATABASE_URL` | ✅ | 공용 Supabase 주소 |
 | `TAVILY_API_KEY` | ✅ | 없으면 수집이 0건이 되고 잡이 실패한다 |
-| `GEMINI_API_KEY` | ❌ | 동의어 병합 전용. 없어도 단독 그룹으로 폴백 |
+| `GEMINI_API_KEY` | ❌ | 2026-08-24부로 이 워크플로우는 안 씀(merge_keywords 단계 제거) — 등록 안 해도 됨 |
 
 **실행 시각이 01:00 UTC인 이유**: 러너 시계는 UTC이고 파이프라인은
 `date.today()`로 주를 계산한다. 한국 시간 기준으로 잡으면(월요일 08:00 KST =
@@ -501,8 +508,9 @@ v3 나란히 비교하려고 의도적으로 그렇게 만듦, `pipeline_v3.py` 
 ./.venv/Scripts/python.exe -m streamlit run app/streamlit_app.py
 ```
 
-직접 검색(라이브 호출, DB 저장 안 함) + 고정 키워드 탭(이번 주 주요 키워드
-막대그래프 + 키워드 선택 시 관련 기사만 필터). 계산은 `dashboard_queries.py`가
+직접 검색(라이브 호출, DB 저장 안 함) + 고정 키워드 탭(키워드 선택 시 관련
+기사만 필터 — "이번 주 주요 키워드" 막대그래프는 2026-08-24에 제거).
+계산은 `dashboard_queries.py`가
 전담하고 화면은 레이아웃만 — 데이터가 바뀔 때 손으로 다시 계산할 부분이 없다.
 
 DB 연결 실패(Supabase 무료 티어는 7일 미사용 시 자동 일시정지된다) 시
@@ -522,7 +530,7 @@ DB 연결 실패(Supabase 무료 티어는 7일 미사용 시 자동 일시정�
 | `collected_articles` | **이번 주 공용 기사 풀** — Tavily 넓은 질의(006)와 v3 수집기가 함께 쓴다. 시장과 분리해 기사당 한 행 | 예 |
 | `article_keyword_relevance` | "기사 × 시장" 판단(다대다). `score`에 분류기 확률을 남겨 화면 정렬에 쓴다(007) | 예 |
 | `article_labels` | 사람이 매긴 관련도 라벨(분류기 학습 데이터). `weekly_runs`를 참조하지 않고 원문을 스냅샷으로 복사해 둔다. `labeled_by`로 라벨 주체를 함께 남긴다(005) | **아니오 — 학습 자산** |
-| `market_keywords` | v2/v3 공용 — "이번 주 주요 키워드" 최종 목록. `pipeline` 컬럼(`search_engine`/`rss_llm`)으로 구분 | 예 |
+| `market_keywords` | v2/v3 공용 — "이번 주 주요 키워드" 최종 목록. `pipeline` 컬럼(`search_engine`/`rss_llm`)으로 구분. **v2(주간 자동 수집)는 2026-08-24부로 이 테이블을 안 채운다** — `pipeline_v3`(수동 실행)만 계속 채움 | 예 |
 
 `market_keywords.canonical_phrase` + `variant_phrases`(병합된 원본 표기들,
 예: `{"OpenAI","오픈AI","오픈 ai"}`)로 `search_results`(v2) 또는
