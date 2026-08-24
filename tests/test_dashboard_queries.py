@@ -300,10 +300,11 @@ def test_get_latest_run_includes_error_message_for_failed_run():
 
 # --- 006 공용 기사 풀 -------------------------------------------------------
 
-def _pool_row(url, *, run_id=1, title="제목", snippet="요약", published_at=None):
+def _pool_row(url, *, run_id=1, title="제목", snippet="요약", published_at=None,
+              source_domain="techcrunch.com"):
     return {
         "run_id": run_id, "title": title, "url": url, "snippet": snippet,
-        "source_domain": "techcrunch.com", "published_at": published_at,
+        "source_domain": source_domain, "published_at": published_at,
         "source_name": "TechCrunch",
     }
 
@@ -421,6 +422,98 @@ def test_get_pool_articles_ignores_other_markets_scores():
 
     assert [r["title"] for r in result] == ["나", "가"]        # 점수 없음 → 최신순
     assert all(r["score"] is None for r in result)
+
+
+# --- 국내 매체 우선(2026-08-24 담당자 피드백 — 해외 기사에 묻혀 국내 기사가
+# 잘 안 보인다) ---------------------------------------------------------------
+
+def test_get_pool_articles_puts_domestic_sources_first_even_if_older():
+    """해외 기사가 더 최신이어도(점수 없는 상태의 기본 정렬 기준) 국내 매체가
+    앞에 와야 한다."""
+    conn = _FakeConn(collected_articles=[
+        _pool_row("https://a.com/kr", title="국내", published_at=datetime(2026, 8, 10),
+                  source_domain="aitimes.com"),
+        _pool_row("https://a.com/en", title="해외", published_at=datetime(2026, 8, 19),
+                  source_domain="techcrunch.com"),
+    ])
+
+    result = dq.get_pool_articles(conn, run_id=1)
+
+    assert [r["title"] for r in result] == ["국내", "해외"]
+
+
+def test_get_pool_articles_domestic_first_matches_www_prefixed_domains():
+    """source_domain엔 urlsplit(url).netloc이 그대로 들어있어 "www."가 붙기도
+    한다 — 정확히 일치하는 도메인만 보면 이런 값을 놓친다."""
+    conn = _FakeConn(collected_articles=[
+        _pool_row("https://a.com/kr", title="국내", published_at=datetime(2026, 8, 10),
+                  source_domain="www.aitimes.com"),
+        _pool_row("https://a.com/en", title="해외", published_at=datetime(2026, 8, 19),
+                  source_domain="techcrunch.com"),
+    ])
+
+    result = dq.get_pool_articles(conn, run_id=1)
+
+    assert [r["title"] for r in result] == ["국내", "해외"]
+
+
+def test_get_pool_articles_domestic_first_keeps_score_order_within_each_group():
+    """국내/해외 구분이 맨 앞에 끼어들 뿐, 그 안에서는 기존 정렬 기준(분류기
+    점수)이 그대로 유지돼야 한다 — domestic-first가 기존 순위 로직을
+    대체하는 게 아니다."""
+    conn = _FakeConn(
+        collected_articles=[
+            _pool_row("https://a.com/kr-low", title="국내-낮음", source_domain="aitimes.com"),
+            _pool_row("https://a.com/kr-high", title="국내-높음", source_domain="aitimes.com"),
+            _pool_row("https://a.com/en-low", title="해외-낮음", source_domain="techcrunch.com"),
+            _pool_row("https://a.com/en-high", title="해외-높음", source_domain="techcrunch.com"),
+        ],
+        article_keyword_relevance=[
+            {"url": "https://a.com/kr-low", "fixed_keyword_id": 1, "score": 0.1},
+            {"url": "https://a.com/kr-high", "fixed_keyword_id": 1, "score": 0.9},
+            {"url": "https://a.com/en-low", "fixed_keyword_id": 1, "score": 0.2},
+            {"url": "https://a.com/en-high", "fixed_keyword_id": 1, "score": 0.8},
+        ],
+    )
+
+    result = dq.get_pool_articles(conn, run_id=1, fixed_keyword_id=1)
+
+    assert [r["title"] for r in result] == ["국내-높음", "국내-낮음", "해외-높음", "해외-낮음"]
+
+
+def test_get_pool_articles_for_variants_puts_domestic_first():
+    conn = _FakeConn(collected_articles=[
+        _pool_row("https://a.com/en", title="해외", published_at=datetime(2026, 8, 19),
+                  source_domain="techcrunch.com"),
+        _pool_row("https://a.com/kr", title="국내", published_at=datetime(2026, 8, 10),
+                  source_domain="etnews.com"),
+    ])
+
+    result = dq.get_pool_articles_for_variants(conn, run_id=1, variant_phrases=["요약"])
+
+    assert [r["title"] for r in result] == ["국내", "해외"]
+
+
+def test_get_pool_articles_limit_applies_after_domestic_sort():
+    """limit이 SQL에서 먼저 자르면 그 바깥에 있던 국내 기사가 애초에 후보에도
+    못 든다 — 정렬 뒤에 자르는지를 확인한다."""
+    conn = _FakeConn(collected_articles=[
+        _pool_row(f"https://a.com/en{i}", title=f"해외{i}",
+                  published_at=datetime(2026, 8, 19), source_domain="techcrunch.com")
+        for i in range(5)
+    ] + [
+        _pool_row("https://a.com/kr", title="국내", published_at=datetime(2026, 8, 1),
+                  source_domain="aitimes.com"),
+    ])
+
+    result = dq.get_pool_articles(conn, run_id=1, limit=3)
+
+    assert result[0]["title"] == "국내"
+    assert len(result) == 3
+
+
+def test_describe_ordering_mentions_domestic_first():
+    assert "국내 매체 우선" in dq.describe_ordering([{"score": 0.5}])
 
 
 # --- 주차 선택(소급 수집으로 한 run에 여러 주가 섞인다) --------------------
