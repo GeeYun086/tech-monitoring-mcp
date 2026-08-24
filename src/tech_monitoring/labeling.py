@@ -121,6 +121,22 @@ def fetch_labeled_url_norms(conn, fixed_keyword_id: int, labeled_by: str | None 
         return {row[0] for row in cur.fetchall()}
 
 
+def fetch_label_map(conn, fixed_keyword_id: int, labeled_by: str | None = None) -> dict[str, str]:
+    """이 사람이 이 고정 키워드에 매긴 라벨 맵(url_norm -> label).
+
+    fetch_labeled_url_norms는 "있다/없다"만 알려줘서 부족하다 — 인라인
+    👍/👎 버튼(2026-08-24, 🏷️ 라벨링 탭을 대체)이 지금 상태를 알아야
+    "같은 버튼을 다시 누르면 취소, 반대 버튼을 누르면 뒤집기"를 판정할 수
+    있다."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT url_norm, label FROM article_labels "
+            "WHERE fixed_keyword_id = %s AND labeled_by = %s",
+            (fixed_keyword_id, _labeler(labeled_by)),
+        )
+        return dict(cur.fetchall())
+
+
 def _fetch_search_result_candidates(conn, run_id: int, fixed_keyword_id: int) -> list[dict]:
     """v2 수집분. search_results는 고정 키워드별로 검색한 결과라 행 하나가
     이미 "기사 × 키워드" 쌍이다."""

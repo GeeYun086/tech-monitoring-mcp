@@ -144,22 +144,22 @@ def _save_relevance(
 
 
 def score_with_classifier(bundle: dict, fixed_keyword: dict, articles: list[dict]) -> list[float]:
-    """학습된 로컬 분류기로 기사마다 "이 시장에 도움될 확률"을 매긴다.
+    """학습된 로컬 분류기로 기사마다 "도움될 확률"을 매긴다.
 
-    relevance_model.build_text가 읽을 수 있는 모양으로 맞춰서 넘긴다 —
-    학습 때와 **똑같은 입력 형식**이어야 한다(고정 키워드를 앞에 붙인
-    "키워드 [SEP] 제목 요약"). 여기서 형식이 어긋나면 정확도가 조용히
-    무너지므로 build_text를 직접 재사용한다.
+    relevance_model.build_text가 읽을 수 있는 모양(제목+요약)으로 맞춰서
+    넘긴다 — 학습 때와 **똑같은 입력 형식**이어야 한다. 여기서 형식이
+    어긋나면 정확도가 조용히 무너지므로 build_text를 직접 재사용한다.
+    fixed_keyword는 더 이상 입력 텍스트에 안 들어간다(2026-08-24, 시장
+    구분 제거 — relevance_model.build_text 헤더 참고). 그래도 인자로 받는
+    이유는 judge_keyword가 결과 태깅(어느 fixed_keyword_id에 저장할지)에
+    여전히 쓰기 때문이다.
 
     확률을 그대로 돌려주는 게 핵심이다(예전에는 여기서 0.5로 잘라 집합만
     돌려줘 순위 정보를 버렸다 — 007 헤더 참고).
     """
     from tech_monitoring.relevance_model import predict_proba
 
-    rows = [
-        {"fixed_keyword": fixed_keyword["keyword"], "title": a["title"], "snippet": a.get("snippet")}
-        for a in articles
-    ]
+    rows = [{"title": a["title"], "snippet": a.get("snippet")} for a in articles]
     return [float(p) for p in predict_proba(bundle, rows)]
 
 
