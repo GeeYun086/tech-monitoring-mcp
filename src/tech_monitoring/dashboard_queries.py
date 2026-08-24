@@ -27,6 +27,10 @@ from datetime import timedelta
 # 목록이 같은 주차 버킷 개념을 써야 한다. labeling은 이 모듈을 import하지
 # 않으므로 순환 참조가 아니다.
 from tech_monitoring import labeling
+# 국내/해외 매체 구분은 새로 만들지 않고 수집 시점에 이미 코드로 확정해둔
+# 값을 그대로 쓴다(아래 _is_domestic 참고) — collectors는 dashboard_queries를
+# import하지 않으므로 순환 참조가 아니다.
+from tech_monitoring.collectors.search_engine import KOREAN_DOMAINS
 from tech_monitoring.utils.text import strip_article_boilerplate
 
 _SUMMARY_MAX_CHARS = 150
@@ -51,6 +55,27 @@ def truncate_summary(text: str | None, max_chars: int = _SUMMARY_MAX_CHARS) -> s
 def _apply_summary_truncation(rows: list[dict]) -> list[dict]:
     for row in rows:
         row["snippet"] = truncate_summary(row.get("snippet"))
+    return rows
+
+
+def _is_domestic(source_domain: str | None) -> bool:
+    """국내 매체 여부 — 새 판정 기준을 만들지 않고 collectors/search_engine.py의
+    KOREAN_DOMAINS(수집원을 등록할 때 이미 사람이 정한 국적)를 그대로 재사용한다.
+
+    정확히 같은 도메인이 아니라 접미사 일치를 보는 이유: source_domain엔
+    urlsplit(url).netloc이 그대로 들어있어 "www.aitimes.com"처럼 하위 도메인이
+    붙기도 한다(실제 저장값이 사이트마다 www. 유무가 다르다)."""
+    if not source_domain:
+        return False
+    return any(source_domain == d or source_domain.endswith(f".{d}") for d in KOREAN_DOMAINS)
+
+
+def _sort_domestic_first(rows: list[dict]) -> list[dict]:
+    """국내 매체 기사를 맨 위로(2026-08-24 담당자 피드백 — 해외 기사에 묻혀
+    국내 기사가 잘 안 보인다). 안정 정렬이라 그 안에서는 기존 순서(분류기
+    점수 또는 최신순, SQL의 ORDER BY 결과)가 그대로 유지된다 — 국내/해외
+    구분만 맨 앞에 끼워 넣는 것이지 기존 순위 기준을 대체하지 않는다."""
+    rows.sort(key=lambda r: not _is_domestic(r.get("source_domain")))
     return rows
 
 
@@ -204,9 +229,12 @@ def describe_ordering(articles: list[dict]) -> str:
     순서를 밝히는 게 중요한 이유: 모델이 없어 임시 정렬 중인데 그걸 모르면
     사람도 Claude도 "추천 순위"로 읽는다.
     """
-    if any(a.get("score") is not None for a in articles):
-        return "분류기 점수 높은 순(사람이 매긴 라벨로 학습)"
-    return "최신순(아직 학습된 모델이 없음)"
+    base = (
+        "분류기 점수 높은 순(사람이 매긴 라벨로 학습)"
+        if any(a.get("score") is not None for a in articles)
+        else "최신순(아직 학습된 모델이 없음)"
+    )
+    return f"국내 매체 우선 · {base}"
 
 
 def get_pool_articles(
@@ -236,6 +264,12 @@ def get_pool_articles(
     목록을 따로 두는 방법도 있었으나, 담당자가 **라벨 기반 순위 하나로만
     가기로 결정**했다 — 사람이 매긴 판단이 쌓일수록 순위가 정확해지는 구조가
     더 단순하고, 여러 사람이 라벨링에 참여하면 그 자체로 선별이 개선된다.
+
+    **국내 매체 우선(2026-08-24 담당자 피드백)**: 해외 기사에 묻혀 국내
+    기사가 잘 안 보인다는 의견을 받아, 위 정렬 결과 위에 국내/해외 구분을
+    한 번 더 앞세운다(_sort_domestic_first). limit을 SQL이 아니라 이 정렬
+    **뒤에** 파이썬에서 자르는 이유: SQL이 먼저 자르면 자른 조각 바깥에 있던
+    국내 기사가 애초에 후보에도 못 들어 domestic-first가 무의미해진다.
     """
     if fixed_keyword_id is None:
         where, week_params = _week_filter(week_start)
@@ -258,13 +292,12 @@ def get_pool_articles(
             "ORDER BY r.score DESC NULLS LAST, ca.published_at DESC NULLS LAST"
         )
         params = [fixed_keyword_id, run_id, *week_params]
-    if limit is not None:
-        query += " LIMIT %s"
-        params.append(limit)
     with conn.cursor() as cur:
         cur.execute(query, params)
         columns = [c.name for c in cur.description]
-        return _apply_summary_truncation([dict(zip(columns, row)) for row in cur.fetchall()])
+        rows = _apply_summary_truncation([dict(zip(columns, row)) for row in cur.fetchall()])
+    rows = _sort_domestic_first(rows)
+    return rows[:limit] if limit is not None else rows
 
 
 def get_pool_articles_for_variants(
@@ -275,7 +308,10 @@ def get_pool_articles_for_variants(
 
     이건 **관련도 판단이 아니라 보조 필터**다. "에이전트 도입"처럼 기사에
     그대로 안 쓰이는 표현으로는 거의 걸리지 않으므로, 시장별 선별은 분류기가
-    맡고 이 필터는 사용자가 특정 키워드를 눌러 좁혀볼 때만 쓴다."""
+    맡고 이 필터는 사용자가 특정 키워드를 눌러 좁혀볼 때만 쓴다.
+
+    get_pool_articles와 같은 이유로 국내 매체를 앞세우고(2026-08-24,
+    _sort_domestic_first), limit은 그 정렬 뒤 파이썬에서 자른다."""
     if not variant_phrases:
         return []
     patterns = [f"%{v}%" for v in variant_phrases]
@@ -287,13 +323,12 @@ def get_pool_articles_for_variants(
         "ORDER BY published_at DESC NULLS LAST"
     )
     params: list = [run_id, patterns, patterns, *week_params]
-    if limit is not None:
-        query += " LIMIT %s"
-        params.append(limit)
     with conn.cursor() as cur:
         cur.execute(query, params)
         columns = [c.name for c in cur.description]
-        return _apply_summary_truncation([dict(zip(columns, row)) for row in cur.fetchall()])
+        rows = _apply_summary_truncation([dict(zip(columns, row)) for row in cur.fetchall()])
+    rows = _sort_domestic_first(rows)
+    return rows[:limit] if limit is not None else rows
 
 
 def get_search_results_for_variants(

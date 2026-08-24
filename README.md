@@ -192,7 +192,7 @@ TF-IDF는 찍기 기준선을 못 넘어(정확도 0.550 vs 0.567) `build_model`
 | --- | --- |
 | `get_status` | 기준 기간·기사 수·주차별 건수·시장 목록·라벨 현황(+파이프라인 실패 사유) |
 | `get_markets` | 시장 목록과 시장별 라벨 진행 상황 |
-| `get_articles(market, limit)` | 한 시장의 기사 — **분류기 점수순**, 모델이 없으면 최신순 |
+| `get_articles(market, limit)` | 한 시장의 기사 — **국내 매체 우선** + 분류기 점수순(모델이 없으면 최신순) |
 | `get_keywords(market, limit)` | 한 시장의 주요 키워드(보조 지표) — 2026-08-24부로 파이프라인이 `market_keywords`를 더 이상 채우지 않아 빈 결과를 돌려준다 |
 
 응답에 **순서의 근거**(`ordering`)와 **전체 건수**(`total`)를 함께 담는다 —
