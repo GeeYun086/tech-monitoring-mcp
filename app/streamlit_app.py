@@ -26,11 +26,13 @@
          (006), **정렬만** 시장별 분류기 점수로 달라진다(007) — 점수가 낮은
          기사도 목록에 남는다. 아직 모델이 없으면 최신순이고, 무엇으로
          정렬됐는지 목록 위에 표시한다.
-       - 이번 주 주요 키워드는 접힌 expander(보조 지표)로 축소했다 —
-         대문자 시작 휴리스틱이라 완벽하지 않고(US·Security 같은 애매한
-         것도 섞임), 담당자가 "기사를 제대로 보여주는 쪽"에 무게를 두기로
-         확인(2026-08-13). 코드는 그대로 두어 나중에 Gemini 복구되면
-         품질을 다시 올릴 수 있게 했다.
+       - "이번 주 주요 키워드" 차트는 없앴다(2026-08-24 담당자 결정) —
+         대문자 시작 휴리스틱이라 품질이 낮은 채로 방치돼 있었는데, 그
+         목록을 만들려고 파이프라인이 매주 Gemini 동의어 병합을 부르는
+         비용이 품질 대비 아깝다는 판단. pipeline_v2.py에서도
+         merge_keywords 단계를 뺐다 — market_keywords 테이블이 더 이상
+         채워지지 않는다(MCP get_keywords 툴은 남아 있지만 이제 빈 결과를
+         돌려준다).
 
 DB 연결은 .env(DATABASE_URL)에서 읽는다(config.py 경유).
 
@@ -132,19 +134,6 @@ def _render_article_list(articles: list[dict]) -> None:
         )
         if a.get("snippet"):
             st.caption(a["snippet"])
-
-
-def _render_keyword_expander(keywords: list[dict]) -> None:
-    with st.expander("📊 이번 주 주요 키워드 (보조 지표 — 정확도 제한 있음)", expanded=False):
-        st.caption(
-            "영문은 '단어가 대문자로 시작하면 기업·기술명일 것'이라는 근사 규칙이라 "
-            "US·Security처럼 애매한 것도 섞일 수 있습니다. 정확한 개체명 인식은 아닙니다."
-        )
-        if not keywords:
-            st.info("이번 주 주요 키워드가 아직 없습니다.")
-        else:
-            top = keywords[:15]
-            st.bar_chart({k["canonical_phrase"]: k["doc_count"] for k in top})
 
 
 _ALL_WEEKS = "전체 기간"
@@ -504,9 +493,9 @@ def _render_performance_tab(conn) -> None:
 
 
 def _render_keyword_tab(conn, run_id: int, fixed_keyword: dict) -> None:
+    # "이번 주 주요 키워드" 차트는 없앴지만(2026-08-24, 위 모듈 docstring 참고)
+    # canonical_phrase는 아래 "키워드로 기사 필터링" 드롭다운에 그대로 쓴다.
     keywords = dq.get_market_keywords(conn, run_id, fixed_keyword["id"])
-
-    _render_keyword_expander(keywords)
 
     st.markdown("**주간 이슈 기사**")
     week_start = _select_week(conn, run_id, key=f"articles_week_{fixed_keyword['id']}")
