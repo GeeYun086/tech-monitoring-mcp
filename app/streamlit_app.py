@@ -62,7 +62,7 @@ from tech_monitoring import labeling
 from tech_monitoring import relevance_model
 from tech_monitoring.analysis.relevance_filter import judge_all
 from tech_monitoring.db.connection import get_connection
-from tech_monitoring.db.weekly_run import get_run_period, week_bounds_for
+from tech_monitoring.db.weekly_run import get_run_period
 from tech_monitoring.utils.url_normalize import normalize_url
 
 st.set_page_config(page_title="AX 시장 모니터링", layout="wide")
@@ -114,45 +114,6 @@ def _render_run_banner(conn, run: dict | None) -> None:
             f"이번 주 파이프라인에서 실패한 단계가 있습니다: **{run.get('error_message') or '(사유 미기록)'}**  \n"
             "아래 결과가 불완전할 수 있습니다. 실패 사유는 파이프라인 실행 로그를 확인하세요."
         )
-
-
-_ALL_WEEKS = "전체 기간"
-_UNDATED_LABEL = "날짜 미상"
-
-
-def _week_label(week_start) -> str:
-    """주를 "8/10~8/16"처럼 **기간 범위**로 적는다(2026-08-19 담당자 요청).
-
-    월요일 날짜 하나만 적으면("2026-08-10 주") 그게 그 주의 시작인지, 그 날
-    수집했다는 뜻인지 읽는 사람이 알 수 없다. 이 프로젝트는 "월요일에 직전
-    주를 걷는다"라서 수집일과 기사 발행 주가 항상 어긋나 있어 더 헷갈린다 —
-    8/17에 걷은 건 8/10~8/16 기사다. 범위로 적으면 그 혼동이 사라진다.
-    """
-    _monday, sunday = week_bounds_for(week_start)
-    return f"{week_start.month}/{week_start.day}~{sunday.month}/{sunday.day}"
-
-
-def _week_options(conn, run_id: int) -> dict:
-    """주차 선택 라벨 -> week_start 값. 소급 수집(작업 4)으로 한 run에 여러 주가
-    섞여 있어서, 한 주씩 골라 보고 라벨할 수 있어야 한다 — 후보가 최신순이라
-    필터 없이 진행하면 라벨이 최신 주에만 몰리고 주차 단위 교차검증이 성립하지
-    않는다(실측: 라벨 30건이 전부 한 주에 몰렸다)."""
-    options = {_ALL_WEEKS: None}
-    for week in dq.get_pool_weeks(conn, run_id):
-        if week["week_start"] is None:
-            options[f"{_UNDATED_LABEL} ({week['total']}건)"] = labeling.UNDATED
-        else:
-            options[f"{_week_label(week['week_start'])} ({week['total']}건)"] = week["week_start"]
-    return options
-
-
-def _select_week(conn, run_id: int, key: str):
-    """주차 선택 위젯. 선택값(week_start)을 그대로 조회 함수에 넘기면 된다."""
-    options = _week_options(conn, run_id)
-    if len(options) <= 1:          # 한 주뿐이면 고를 게 없다
-        return None
-    label = st.selectbox("어느 주 기사를 볼까요?", list(options), key=key)
-    return options[label]
 
 
 _LABEL_BADGES = {
@@ -466,14 +427,16 @@ def _pool_embeddings(cache_key: tuple, _articles: list[dict]):
     """기사 목록을 문장 임베딩으로 미리 변환해 캐시한다.
 
     **캐시 키는 run_id가 아니라 기사 URL 튜플이다(2026-08-24 버그 수정)** —
-    run_id만으로 캐시하면, 같은 run 안에서도 주차 선택(_select_week)에 따라
-    articles 길이가 달라지는 걸 못 잡아서(예: 전체 415건 보다가 특정 주만
-    골라 92건이 됨), 이전에 캐시된 415개짜리 임베딩을 그대로 돌려줘 아래
-    유사도 계산에서 길이가 안 맞아 IndexError가 났다(실사용 중 발견). URL
-    튜플로 잡으면 목록이 바뀔 때마다 정확히 다시 계산된다(articles 자체는
-    앞에 밑줄 — 리스트라 해시 불가, dashboard_queries.py의 다른 캐시
-    함수들과 같은 관례). 검색할 때마다 다시 인코딩하면 매번 몇 초씩
-    걸리는데, 이렇게 하면 같은 목록에 대한 첫 검색에만 비용을 치른다."""
+    run_id만으로 캐시하면, 같은 run 안에서도 화면에 보여주는 articles 길이가
+    달라지는 상황(당시엔 주차 선택 드롭다운이 있어 전체 415건 보다가 특정
+    주만 골라 92건이 되는 식이었다 — 그 드롭다운은 이후 없앴지만 캐시 키를
+    articles 내용 자체로 잡는 게 근본적으로 더 안전하다는 교훈은 남는다)를
+    못 잡아서, 이전에 캐시된 415개짜리 임베딩을 그대로 돌려줘 아래 유사도
+    계산에서 길이가 안 맞아 IndexError가 났다(실사용 중 발견). URL 튜플로
+    잡으면 목록이 바뀔 때마다 정확히 다시 계산된다(articles 자체는 앞에
+    밑줄 — 리스트라 해시 불가, dashboard_queries.py의 다른 캐시 함수들과
+    같은 관례). 검색할 때마다 다시 인코딩하면 매번 몇 초씩 걸리는데, 이렇게
+    하면 같은 목록에 대한 첫 검색에만 비용을 치른다."""
     from tech_monitoring.relevance_model import encode_texts
 
     texts = [f"{a['title']} {a.get('snippet') or ''}".strip() for a in _articles]
@@ -515,10 +478,12 @@ def _search_by_keyword(
 
 def _render_keyword_tab(conn, run_id: int, fixed_keyword: dict, period_start) -> None:
     st.markdown("**주간 이슈 기사**")
-    week_start = _select_week(conn, run_id, key=f"articles_week_{fixed_keyword['id']}")
 
-    # 006부터 기사는 시장과 무관한 공용 풀에서 온다.
-    articles = dq.get_pool_articles(conn, run_id, fixed_keyword["id"], week_start=week_start)
+    # 006부터 기사는 시장과 무관한 공용 풀에서 온다. 주차 선택 드롭다운은
+    # 없앴다(2026-08-24 담당자 결정) — 이제 항상 딱 한 주만 존재해서(db/
+    # weekly_run.py, 매주 전체 wipe 후 직전 완료된 한 주만 재수집) 고를 게
+    # 없다.
+    articles = dq.get_pool_articles(conn, run_id, fixed_keyword["id"])
 
     query = st.text_input(
         "키워드로 검색(완전히 같은 단어가 아니어도 뜻이 비슷하면 찾아줍니다)",
