@@ -1,6 +1,13 @@
 [project]
 name = "tech-monitoring-mcp"
-version = "0.2.0"
+# 0.2.0 -> 0.2.1(2026-08-25): 배포 환경(Streamlit Cloud)이 좋아요 카운트를
+# 계속 옛 코드로 보여주는 문제 때문에 강제로 올렸다. requirements.txt를
+# "-e ."로 바꿨는데도(2026-08-25 앞선 커밋) 재부팅 후에도 안 고쳐졌다 —
+# 유력한 원인은 pip이 이미 설치된 "tech-monitoring-mcp==0.2.0"을 "이미
+# 만족됨"으로 보고 일반 설치 -> editable 전환 자체를 건너뛴 것. 버전을
+# 올리면 pip이 "다른 버전"으로 인식해 무조건 다시(이번엔 editable로) 설치를
+# 강제한다. 앞으로는 -e .라서 이 문제가 재발하지 않아야 정상이다.
+version = "0.2.1"
 description = "AX 시장 모니터링 — 큐레이션 검색엔진 + 구글 검색 API + Gemini 동의어 병합"
 requires-python = ">=3.12"
 dependencies = [
