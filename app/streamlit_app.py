@@ -451,26 +451,34 @@ def _render_performance_tab(conn) -> None:
     )
 
 
-def _search_by_keyword(articles: list[dict], query: str) -> list[dict]:
-    """제목·요약에 검색어가 그대로 들어있는 기사만 찾는다(2026-08-25,
-    임베딩 방식에서 되돌림).
+def _search_by_keyword(
+    articles: list[dict], query: str, *, top_k: int = 50, min_similarity: float = 0.05,
+) -> list[dict]:
+    """문자 n-gram TF-IDF 코사인 유사도로 기사를 찾는다(2026-08-25, 두 번째
+    되돌림 — 단순 포함 검색 다음 단계).
 
-    **원래는(2026-08-24) 문장 임베딩 코사인 유사도 방식이었다** — "생성형
-    AI"를 검색해도 "LLM" 같은 다른 표현까지 걸리게 하려는 목적이었다.
-    그런데 그 방식은 sentence-transformers(선택 설치, pyproject의
-    [embedding] extra)가 있어야 도는데, **배포 환경(Streamlit Cloud)엔
-    일부러 안 깔려 있다**(torch 527MB+모델 458MB가 무료 티어엔 너무 커서 —
-    requirements.txt 헤더 참고). 그 결과 배포된 화면에서는 검색을 누를
-    때마다 "임베딩 라이브러리가 필요하다"는 안내만 뜨고 실제로는 전혀
-    작동하지 않았다 — 담당자 확인 후 "완전 일치가 안 되더라도 배포 환경에서
-    실제로 동작하는 쪽"으로 되돌리기로 했다. 대소문자 구분 없이 부분 문자열
-    포함 여부만 본다 — 별도 라이브러리가 필요 없어 배포 환경에서도 항상
-    동작한다."""
-    needle = query.lower()
-    return [
-        a for a in articles
-        if needle in (a["title"] or "").lower() or needle in (a.get("snippet") or "").lower()
-    ]
+    **문장 임베딩(sentence-transformers)은 여전히 안 쓴다** — 배포 환경엔
+    일부러 안 깔려 있다(torch 527MB+모델 458MB가 무료 티어엔 너무 커서,
+    requirements.txt 헤더 참고). 그 대신 relevance_model.py가 분류기 학습에
+    이미 쓰는 것과 같은 방식(문자 2~4-gram TF-IDF, 형태소 분석기 없이 한국어
+    처리)을 재사용한다 — scikit-learn은 이미 필수 의존성이라 배포 환경에서도
+    항상 동작한다.
+
+    **한계**: "생성형 AI"로 검색해도 "LLM"·"챗봇" 같은 **다른 단어를 쓴**
+    기사는 못 찾는다(진짜 동의어 매칭은 임베딩이 있어야 가능). 대신 단순
+    포함 검색과 달리 문구가 정확히 안 겹쳐도 **일부 단어(문자열)만 겹쳐도**
+    유사도 순위에 낀다 — 완전 일치보다는 넓게, 임베딩보다는 좁게 찾는
+    중간 지점이다."""
+    from sklearn.feature_extraction.text import TfidfVectorizer
+
+    texts = [f"{a['title']} {a.get('snippet') or ''}".strip() for a in articles]
+    vectorizer = TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 4), min_df=1)
+    doc_vecs = vectorizer.fit_transform(texts)
+    query_vec = vectorizer.transform([query])
+
+    similarities = (doc_vecs @ query_vec.T).toarray().ravel()
+    order = similarities.argsort()[::-1]
+    return [articles[i] for i in order if similarities[i] >= min_similarity][:top_k]
 
 
 def _render_keyword_tab(conn, run_id: int, fixed_keyword: dict, period_start) -> None:
@@ -489,7 +497,7 @@ def _render_keyword_tab(conn, run_id: int, fixed_keyword: dict, period_start) ->
     )
     if query.strip():
         articles = _search_by_keyword(articles, query.strip())
-        st.caption(f"'{query.strip()}'이(가) 포함된 기사 {len(articles)}건")
+        st.caption(f"'{query.strip()}'와(과) 유사한 기사 {len(articles)}건")
         _render_feedback_article_list(conn, fixed_keyword, articles, period_start)
         return
 
