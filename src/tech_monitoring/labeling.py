@@ -121,18 +121,22 @@ def fetch_labeled_url_norms(conn, fixed_keyword_id: int, labeled_by: str | None 
         return {row[0] for row in cur.fetchall()}
 
 
-def fetch_label_map(conn, fixed_keyword_id: int, labeled_by: str | None = None) -> dict[str, str]:
-    """이 사람이 이 고정 키워드에 매긴 라벨 맵(url_norm -> label).
+def fetch_like_counts(conn, fixed_keyword_id: int, label: str = LABEL_RELEVANT) -> dict[str, int]:
+    """기사별 좋아요(기본 LABEL_RELEVANT) 개수(url_norm -> 건수).
 
-    fetch_labeled_url_norms는 "있다/없다"만 알려줘서 부족하다 — 인라인
-    👍/👎 버튼(2026-08-24, 🏷️ 라벨링 탭을 대체)이 지금 상태를 알아야
-    "같은 버튼을 다시 누르면 취소, 반대 버튼을 누르면 뒤집기"를 판정할 수
-    있다."""
+    **누가 눌렀는지는 안 본다 — labeled_by로 좁히지 않고 전부 센다.**
+    2026-08-24 결정: 인라인 👍/👎(이전엔 fetch_label_map으로 "내 라벨"
+    하나만 확인했다)를 사람 식별 없는 익명 집계로 바꿨다 — 화면에서 세션마다
+    무작위 labeled_by를 새로 발급해 저장하므로(app/streamlit_app.py 참고)
+    "내 라벨"이라는 개념 자체가 더는 안전하게 성립하지 않고, 그 대신 같은
+    기사에 쌓인 행 수를 그대로 "좋아요 N명"으로 보여준다. 실수로 두 번
+    누른 것(취소 없이 새로고침 등)까지 다 세는 게 정밀하진 않지만, 로그인
+    없는 이런 위젯이 흔히 감수하는 수준의 오차다."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT url_norm, label FROM article_labels "
-            "WHERE fixed_keyword_id = %s AND labeled_by = %s",
-            (fixed_keyword_id, _labeler(labeled_by)),
+            "SELECT url_norm, count(*) FROM article_labels "
+            "WHERE fixed_keyword_id = %s AND label = %s GROUP BY url_norm",
+            (fixed_keyword_id, label),
         )
         return dict(cur.fetchall())
 

@@ -14,6 +14,11 @@ db/weekly_run.py의 mark_bootstrapped/is_bootstrapped와 같은 패턴이다.
 **시도했다는 사실 자체를 기록**하는 이유: 라벨이 아직 찍기 기준선을 못
 넘어 build_model이 None을 돌려줘도 카운터는 갱신해야, 그 다음 라벨 한 건마다
 매번 재시도(비싼 임베딩 인코딩 포함)하는 걸 막을 수 있다.
+
+**labeling.ALL_LABELERS로 부르는 이유(2026-08-24, 익명 좋아요 개수 집계
+도입)**: 인라인 버튼이 세션마다 무작위 labeled_by를 새로 발급하므로,
+labeled_by 기본값(설정값 하나)으로 좁혀 세는 예전 방식으로는 새로 쌓이는
+라벨이 전부 안 걸린다 — 그러면 항상 0건으로 보여 재학습이 영원히 안 돈다.
 """
 
 from tech_monitoring import labeling
@@ -60,7 +65,7 @@ def maybe_retrain(conn, *, every: int = RETRAIN_EVERY_N_LABELS) -> dict | None:
     못 넘겨 모델을 쓰지 않았다는 뜻이다(build_model이 None을 돌려준
     경우) — 이 경우에도 카운터는 갱신되므로 다음 시도는 또 every건 뒤다.
     """
-    labels = labeling.fetch_all_labels(conn)
+    labels = labeling.fetch_all_labels(conn, labeled_by=labeling.ALL_LABELERS)
     last = _get_last_retrain_count(conn)
     if len(labels) - last < every:
         return None
