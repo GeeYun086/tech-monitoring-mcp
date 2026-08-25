@@ -27,7 +27,10 @@ def _patch(monkeypatch, *, run=None, markets=(), articles=(), keywords=(),
     monkeypatch.setattr(queries.dq, "get_market_keywords", lambda conn, r, k, limit=30: list(keywords))
     monkeypatch.setattr(queries.dq, "get_pool_span", lambda conn, r: span or {"oldest": None, "newest": None, "total": 0})
     monkeypatch.setattr(queries.dq, "get_pool_weeks", lambda conn, r: list(weeks))
-    monkeypatch.setattr(queries.labeling, "count_labels", lambda conn, k=None: labels or {"relevant": 0, "irrelevant": 0, "total": 0})
+    monkeypatch.setattr(
+        queries.labeling, "count_labels",
+        lambda conn, k=None, **_kw: labels or {"relevant": 0, "irrelevant": 0, "total": 0},
+    )
     assert dq and labeling  # 임포트 경로가 같은 객체인지 확인용
 
 
@@ -36,9 +39,10 @@ _RUN = {"id": 1, "period_start": date(2026, 8, 10), "period_end": date(2026, 8, 
 _MARKETS = [{"id": 1, "keyword": "교육"}, {"id": 2, "keyword": "비즈니스 실적"}]
 
 
-def _article(title, score=None, published=datetime(2026, 8, 12)):
+def _article(title, score=None, published=datetime(2026, 8, 12), like_count=0, dislike_count=0):
     return {"title": title, "url": f"https://a.com/{title}", "snippet": "요약",
-            "source_domain": "a.com", "published_at": published, "score": score}
+            "source_domain": "a.com", "published_at": published, "score": score,
+            "like_count": like_count, "dislike_count": dislike_count}
 
 
 # --- 상태 -----------------------------------------------------------------
@@ -127,6 +131,84 @@ def test_market_name_ignores_surrounding_spaces(monkeypatch):
     _patch(monkeypatch, run=_RUN, markets=_MARKETS, articles=[_article("a")])
 
     assert queries.get_articles(_FakeConn(), "  교육 ")["market"] == "교육"
+
+
+def test_articles_carry_like_counts(monkeypatch):
+    """화면(app/streamlit_app.py의 인라인 👍/👎)엔 있는 값이 MCP엔 없으면
+    "화면엔 있는데 Claude는 못 보는" 차이가 생긴다(이 모듈 헤더 참고)."""
+    _patch(monkeypatch, run=_RUN, markets=_MARKETS,
+           articles=[_article("a", like_count=3, dislike_count=1)])
+
+    result = queries.get_articles(_FakeConn(), "교육")
+
+    assert (result["articles"][0]["like_count"], result["articles"][0]["dislike_count"]) == (3, 1)
+
+
+# --- 인기 기사 --------------------------------------------------------------
+
+def test_popular_articles_are_sorted_by_like_count(monkeypatch):
+    _patch(monkeypatch, run=_RUN, markets=_MARKETS, articles=[
+        _article("적음", like_count=1),
+        _article("많음", like_count=5),
+        _article("중간", like_count=2),
+    ])
+
+    result = queries.get_popular_articles(_FakeConn(), "교육")
+
+    assert [a["title"] for a in result["top_articles"]] == ["많음", "중간", "적음"]
+
+
+def test_popular_articles_exclude_articles_with_no_likes(monkeypatch):
+    """0건까지 섞으면 순위가 있는 것처럼 오해한다."""
+    _patch(monkeypatch, run=_RUN, markets=_MARKETS,
+           articles=[_article("좋아요있음", like_count=2), _article("좋아요없음")])
+
+    result = queries.get_popular_articles(_FakeConn(), "교육")
+
+    assert [a["title"] for a in result["top_articles"]] == ["좋아요있음"]
+    assert result["total_articles"] == 2
+    assert result["articles_with_likes"] == 1
+
+
+def test_popular_articles_says_so_when_nothing_has_been_liked_yet(monkeypatch):
+    _patch(monkeypatch, run=_RUN, markets=_MARKETS, articles=[_article("a"), _article("b")])
+
+    result = queries.get_popular_articles(_FakeConn(), "교육")
+
+    assert result["top_articles"] == []
+    assert "근거가 없습니다" in result["note"]
+
+
+def test_popular_articles_note_warns_that_likes_are_anonymous(monkeypatch):
+    _patch(monkeypatch, run=_RUN, markets=_MARKETS, articles=[_article("a", like_count=4)])
+
+    result = queries.get_popular_articles(_FakeConn(), "교육")
+
+    assert "익명" in result["note"]
+
+
+def test_popular_articles_is_capped_at_limit(monkeypatch):
+    _patch(monkeypatch, run=_RUN, markets=_MARKETS,
+           articles=[_article(f"a{i}", like_count=i + 1) for i in range(20)])
+
+    result = queries.get_popular_articles(_FakeConn(), "교육", limit=3)
+
+    assert len(result["top_articles"]) == 3
+    assert result["top_articles"][0]["like_count"] == 20  # 가장 많이 좋아요 받은 것부터
+
+
+def test_popular_articles_reports_no_data_before_first_collection(monkeypatch):
+    _patch(monkeypatch, run=None)
+
+    assert "error" in queries.get_popular_articles(_FakeConn(), "교육")
+
+
+def test_popular_articles_unknown_market_lists_what_is_available(monkeypatch):
+    _patch(monkeypatch, run=_RUN, markets=_MARKETS)
+
+    result = queries.get_popular_articles(_FakeConn(), "없는 시장")
+
+    assert result["available_markets"] == ["교육", "비즈니스 실적"]
 
 
 # --- 키워드 ---------------------------------------------------------------
