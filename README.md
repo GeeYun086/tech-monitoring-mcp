@@ -204,10 +204,17 @@ TF-IDF는 찍기 기준선을 못 넘어(정확도 0.550 vs 0.567) `build_model`
 ### 도커로 배포하기 (남에게 줄 때)
 
 받는 사람이 Python·가상환경·의존성을 만질 필요 없이 `docker run` 한 줄이면 된다.
+**저장소를 클론할 필요도 없다** — `.github/workflows/publish-mcp-image.yml`이
+`main`에 `src/tech_monitoring/**`나 `Dockerfile`이 바뀔 때마다 자동으로 이미지를
+구워 GHCR(GitHub Container Registry)에 올려둔다.
 
 ```bash
-docker build -t tech-monitoring-mcp .
+docker pull ghcr.io/geeyun086/tech-monitoring-mcp:latest
 ```
+
+> 이 저장소가 비공개라 GHCR 이미지도 비공개다. 받는 사람이 이 저장소에 접근
+> 권한이 있다면, `docker pull` 전에 한 번 로그인해야 한다:
+> `echo <개인 액세스 토큰(read:packages)> | docker login ghcr.io -u <GitHub 아이디> --password-stdin`
 
 Claude Desktop 등의 MCP 설정에 이렇게 등록한다(`DATABASE_URL`은 컨테이너에
 굽지 않고 실행할 때 넘긴다 — 이미지에 비밀번호가 들어가면 안 된다):
@@ -219,10 +226,16 @@ Claude Desktop 등의 MCP 설정에 이렇게 등록한다(`DATABASE_URL`은 컨
       "command": "docker",
       "args": ["run", "--rm", "-i",
                "-e", "DATABASE_URL=postgresql://...",
-               "tech-monitoring-mcp"]
+               "ghcr.io/geeyun086/tech-monitoring-mcp:latest"]
     }
   }
 }
+```
+
+이미지를 직접 빌드하고 싶으면(예: 로컬에서 Dockerfile을 수정해 확인할 때):
+
+```bash
+docker build -t tech-monitoring-mcp .
 ```
 
 **이미지에 머신러닝 라이브러리를 넣지 않는다.** MCP 서버는 읽기 전용이라
