@@ -6,10 +6,11 @@
 article_keyword_relevance.score에 저장해두기 때문이다(psycopg만 있으면 된다).
 
 도구 구성은 "먼저 무엇이 있는지 보고, 그다음 좁혀 들어간다"는 순서다:
-    get_status   → 이번 주 기간·기사 수·주차·시장 목록·라벨 현황
-    get_markets  → 시장별 라벨 진행 상황
-    get_articles → 한 시장의 기사(분류기 점수순)
-    get_keywords → 한 시장의 주요 키워드
+    get_status           → 이번 주 기간·기사 수·주차·시장 목록·라벨 현황
+    get_markets          → 시장별 라벨 진행 상황
+    get_articles         → 한 시장의 기사(분류기 점수순, 좋아요 수 포함)
+    get_popular_articles → 한 시장에서 👍를 가장 많이 받은 기사만(주간 인사이트용)
+    get_keywords         → 한 시장의 주요 키워드
 
 계산은 전부 queries.py가 한다 — 여기는 도구 선언과 연결만 담당한다
 (dashboard_queries/streamlit_app의 역할 분리와 같은 원칙).
@@ -42,7 +43,10 @@ mcp = FastMCP(
         "무엇이 있는지 모를 때는 get_status를 먼저 부르세요 — 이번 주 기간, 기사 수, "
         "시장 목록이 한 번에 나옵니다. "
         "기사 순서가 '최신순'으로 표시되면 아직 학습된 모델이 없다는 뜻이므로 "
-        "그 순서를 추천 순위로 해석하지 마세요."
+        "그 순서를 추천 순위로 해석하지 마세요. "
+        "주간 인사이트·보고서를 쓸 때는 get_popular_articles로 담당자들이 직접 "
+        "👍를 누른 기사부터 확인하세요 — 분류기 점수보다 신뢰도가 높습니다. "
+        "좋아요는 익명 집계라 누가 눌렀는지는 알 수 없으니 사람을 특정해 인용하지 마세요."
     ),
 )
 
@@ -95,6 +99,26 @@ def get_articles(market: str, limit: int = queries.DEFAULT_ARTICLE_LIMIT) -> dic
         limit: 돌려줄 기사 수(기본 20, 최대 100). 전체 건수는 total에 담긴다.
     """
     return _with_connection(queries.get_articles, market, limit)
+
+
+@mcp.tool()
+def get_popular_articles(market: str, limit: int = 10) -> dict:
+    """한 시장에서 담당자들이 👍(도움됨)를 가장 많이 누른 이번 주 기사를 돌려준다.
+
+    분류기 점수(추정치)와 달리 사람이 직접 누른 값이라 신뢰도가 높다 —
+    주간 인사이트나 보고서를 쓸 때는 이 결과부터 참고한다. 좋아요를 하나도
+    못 받은 기사는 목록에서 빠진다(0건까지 섞으면 순위가 있는 것처럼
+    오해한다).
+
+    좋아요는 익명 집계다 — "몇 명이 도움된다고 표시했는지"만 알 수 있고
+    누가 눌렀는지는 알 수 없다(응답의 note 참고, 보고서에 사람을 특정해
+    인용하지 말 것).
+
+    Args:
+        market: 시장 이름(예: "기사"). 정확한 이름은 get_markets로 확인한다.
+        limit: 돌려줄 기사 수(기본 10, 최대 100).
+    """
+    return _with_connection(queries.get_popular_articles, market, limit)
 
 
 @mcp.tool()
