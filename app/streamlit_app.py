@@ -483,7 +483,7 @@ def _render_keyword_tab(conn, run_id: int, fixed_keyword: dict, period_start) ->
     articles = dq.get_pool_articles(conn, run_id, fixed_keyword["id"])
 
     query = st.text_input(
-        "키워드로 검색(제목·요약에 그 단어가 그대로 들어있는 기사만 찾습니다)",
+        "키워드로 검색",
         key=f"kw_search_{fixed_keyword['id']}",
         placeholder="예: 생성형 AI",
     )
