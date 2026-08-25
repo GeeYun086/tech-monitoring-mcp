@@ -53,6 +53,8 @@ DB 연결은 .env(DATABASE_URL)에서 읽는다(config.py 경유).
     ./.venv/Scripts/python.exe -m streamlit run app/streamlit_app.py
 """
 
+import secrets
+
 import psycopg
 import streamlit as st
 
@@ -116,12 +118,6 @@ def _render_run_banner(conn, run: dict | None) -> None:
         )
 
 
-_LABEL_BADGES = {
-    labeling.LABEL_RELEVANT: "👍 도움됨",
-    labeling.LABEL_IRRELEVANT: "👎 도움 안 됨",
-}
-
-
 def _apply_retrain_feedback(retrain_result: dict | None) -> None:
     """auto_retrain.maybe_retrain의 결과를 짧은 토스트로 알려준다.
 
@@ -151,10 +147,21 @@ def _render_feedback_article_list(
     get_pool_articles가 돌려주는 행엔 없는 url_norm·source_table만 여기서
     채워 넣는다(labeling.save_label이 요구하는 모양, labeling.py 헤더 참고).
 
-    같은 버튼을 다시 누르면 취소(delete_label), 반대 버튼을 누르면
-    뒤집힌다(save_label의 UPSERT가 그대로 덮어쓴다) — 사람이 지금 상태를
-    보고 판단해야 하므로 fetch_label_map으로 미리 다 가져와 버튼 표시(type=
-    "primary")에 반영한다.
+    **익명 좋아요(2026-08-24 담당자 결정)**: 누가 눌렀는지 남기지 않고
+    개수만 쌓이길 원해서, 클릭할 때마다 무작위 토큰을 labeled_by로 발급한다
+    (실명·계정 불필요). 화면에 "지금 상태"(버튼 강조 표시)를 보여주려면
+    그래도 "내가 이 기사에 어떤 토큰으로 눌렀는지"는 기억해야 하는데, DB
+    조회로는 알 수 없다(토큰이 매번 다르니까) — 그래서 st.session_state에
+    (시장, url_norm) -> {label, token}으로 세션 동안만 기억한다. 브라우저를
+    새로고침하거나 다른 사람이 누르면 새 토큰이 발급돼 별개의 좋아요로
+    쌓인다 — 로그인 없는 위젯이 흔히 감수하는 오차다(labeling.
+    fetch_like_counts 헤더 참고). 같은 세션에서 같은 버튼을 다시 누르면
+    취소(delete_label), 반대 버튼을 누르면 뒤집힌다(save_label의 UPSERT를
+    같은 토큰으로 다시 불러 그대로 덮어쓴다).
+
+    좋아요/싫어요 개수는 dashboard_queries.get_pool_articles가 이미
+    article마다 like_count/dislike_count로 붙여서 준다(사람 구분 없이
+    전체 집계) — 버튼 라벨에 그 숫자를 그대로 보여준다.
 
     **"더 보기" 페이지네이션(2026-08-24 실사용 중 발견)**: 기사마다 버튼을
     2개씩 그리면 시장 하나(최대 415건)만 해도 위젯이 830개를 넘는다.
@@ -173,11 +180,15 @@ def _render_feedback_article_list(
     state_key = f"feedback_visible_{fixed_keyword['id']}"
     visible = st.session_state.get(state_key, _FEEDBACK_PAGE_SIZE)
 
-    label_map = labeling.fetch_label_map(conn, fixed_keyword["id"])
+    # (fixed_keyword_id, url_norm) -> {"label": ..., "token": ...} — 이번
+    # 브라우저 세션 동안만 "내가 누른 것"을 기억한다(위 함수 docstring 참고).
+    my_votes = st.session_state.setdefault("my_votes", {})
 
     for a in articles[:visible]:
         url_norm = normalize_url(a["url"])
-        current = label_map.get(url_norm)
+        vote_key = (fixed_keyword["id"], url_norm)
+        my_vote = my_votes.get(vote_key)
+        current = my_vote["label"] if my_vote else None
 
         published = a["published_at"].strftime("%Y-%m-%d") if a.get("published_at") else ""
         meta = " · ".join(p for p in (a.get("source_domain"), published) if p)
@@ -191,18 +202,24 @@ def _render_feedback_article_list(
         if a.get("snippet"):
             text_col.caption(a["snippet"])
 
+        # 버튼 라벨에 개수를 그대로 보여준다 — 0건이면 굳이 "0"을 안 붙인다.
+        like_count = a.get("like_count") or 0
+        dislike_count = a.get("dislike_count") or 0
+        up_label = f"👍 {like_count}" if like_count else "👍"
+        down_label = f"👎 {dislike_count}" if dislike_count else "👎"
+
         # key에 url_norm을 넣어 기사가 바뀌면 버튼도 새 위젯이 되게 한다 —
         # 같은 key를 재사용하면 Streamlit이 이전 클릭 상태를 물려받는다.
         key = f"{fixed_keyword['id']}_{url_norm}"
         clicked = None
         if up_col.button(
-            "👍", key=f"up_{key}", use_container_width=True,
+            up_label, key=f"up_{key}", use_container_width=True,
             type="primary" if current == labeling.LABEL_RELEVANT else "secondary",
             help="도움이 되는 기사예요(다시 누르면 취소)",
         ):
             clicked = labeling.LABEL_RELEVANT
         if down_col.button(
-            "👎", key=f"down_{key}", use_container_width=True,
+            down_label, key=f"down_{key}", use_container_width=True,
             type="primary" if current == labeling.LABEL_IRRELEVANT else "secondary",
             help="도움이 되지 않는 기사예요(다시 누르면 취소)",
         ):
@@ -211,10 +228,19 @@ def _render_feedback_article_list(
         if clicked is not None:
             with st.spinner("저장하는 중…"):
                 if clicked == current:
-                    labeling.delete_label(conn, url_norm, fixed_keyword["id"])
+                    # 취소 — 이번 세션에서 이 기사에 쓴 그 토큰만 지운다.
+                    labeling.delete_label(conn, url_norm, fixed_keyword["id"], labeled_by=my_vote["token"])
+                    del my_votes[vote_key]
                 else:
+                    # 새 좋아요면 이번에 새 무작위 토큰을 발급하고, 반대
+                    # 버튼으로 뒤집는 거면 방금 그 토큰을 그대로 재사용해
+                    # save_label의 UPSERT가 같은 행을 덮어쓰게 한다.
+                    token = my_vote["token"] if my_vote else secrets.token_hex(8)
                     snapshot = {**a, "source_table": "collected_articles", "url_norm": url_norm}
-                    labeling.save_label(conn, fixed_keyword["id"], snapshot, clicked, period_start)
+                    labeling.save_label(
+                        conn, fixed_keyword["id"], snapshot, clicked, period_start, labeled_by=token,
+                    )
+                    my_votes[vote_key] = {"label": clicked, "token": token}
                 retrain_result = auto_retrain.maybe_retrain(conn)
             _apply_retrain_feedback(retrain_result)
             st.rerun()
@@ -350,7 +376,10 @@ def _render_performance_tab(conn) -> None:
         "정확한 지표(교차검증·시장별 분해)를 보고 싶을 때 눌러 확인하세요."
     )
 
-    labels = labeling.fetch_all_labels(conn)
+    # ALL_LABELERS: 인라인 버튼이 세션마다 무작위 labeled_by를 새로 발급하므로
+    # (2026-08-24, 익명 좋아요 개수 집계 — _render_feedback_article_list 참고)
+    # 기본값(설정값 하나)으로 좁히면 새로 쌓이는 라벨이 다 안 잡힌다.
+    labels = labeling.fetch_all_labels(conn, labeled_by=labeling.ALL_LABELERS)
     distribution = relevance_model.class_distribution(labels)
     _render_distribution(distribution)
     st.divider()

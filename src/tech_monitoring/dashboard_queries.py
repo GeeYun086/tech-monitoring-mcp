@@ -32,6 +32,7 @@ from tech_monitoring import labeling
 # import하지 않으므로 순환 참조가 아니다.
 from tech_monitoring.collectors.search_engine import KOREAN_DOMAINS
 from tech_monitoring.utils.text import strip_article_boilerplate
+from tech_monitoring.utils.url_normalize import normalize_url
 
 _SUMMARY_MAX_CHARS = 150
 
@@ -76,6 +77,33 @@ def _sort_domestic_first(rows: list[dict]) -> list[dict]:
     점수 또는 최신순, SQL의 ORDER BY 결과)가 그대로 유지된다 — 국내/해외
     구분만 맨 앞에 끼워 넣는 것이지 기존 순위 기준을 대체하지 않는다."""
     rows.sort(key=lambda r: not _is_domestic(r.get("source_domain")))
+    return rows
+
+
+def _apply_like_counts(conn, rows: list[dict], fixed_keyword_id: int) -> list[dict]:
+    """기사마다 좋아요/싫어요 개수를 붙인다(2026-08-24, 익명 인라인 👍/👎).
+
+    labeling.fetch_like_counts가 사람은 안 보고 (키워드, 라벨)로만 센 값을
+    그대로 가져와 url_norm으로 매칭한다 — collected_articles.url은 원본
+    URL이라 article_labels.url_norm과 형태가 다를 수 있어(utm 파라미터 등)
+    정규화해서 맞춰야 한다."""
+    likes = labeling.fetch_like_counts(conn, fixed_keyword_id, label=labeling.LABEL_RELEVANT)
+    dislikes = labeling.fetch_like_counts(conn, fixed_keyword_id, label=labeling.LABEL_IRRELEVANT)
+    for row in rows:
+        url_norm = normalize_url(row["url"])
+        row["like_count"] = likes.get(url_norm, 0)
+        row["dislike_count"] = dislikes.get(url_norm, 0)
+    return rows
+
+
+def _sort_by_like_count(rows: list[dict]) -> list[dict]:
+    """좋아요 많은 기사를 앞세운다 — _sort_domestic_first와 같은 안정 정렬
+    관례로, 이 정렬 전에 이미 있던 순서(분류기 점수·최신순)는 좋아요 수가
+    같은 기사끼리는 그대로 유지된다. _sort_domestic_first보다 먼저(낮은
+    우선순위로) 적용해야 한다 — 나중에 적용하는 정렬이 최종 1순위가 되는
+    안정 정렬의 원리를 그대로 쓴다(국내 매체 우선이 좋아요 수보다 위에
+    와야 한다는 기존 방침을 유지)."""
+    rows.sort(key=lambda r: -r.get("like_count", 0))
     return rows
 
 
@@ -234,6 +262,10 @@ def describe_ordering(articles: list[dict]) -> str:
         if any(a.get("score") is not None for a in articles)
         else "최신순(아직 학습된 모델이 없음)"
     )
+    # 좋아요 0건뿐이면 "좋아요순"이라고 밝혀봐야 의미가 없다 — 실제로 반영된
+    # 주에만 표시한다(2026-08-24, _sort_by_like_count).
+    if any(a.get("like_count") for a in articles):
+        return f"국내 매체 우선 · 좋아요 많은 순 · {base}"
     return f"국내 매체 우선 · {base}"
 
 
@@ -270,6 +302,11 @@ def get_pool_articles(
     한 번 더 앞세운다(_sort_domestic_first). limit을 SQL이 아니라 이 정렬
     **뒤에** 파이썬에서 자르는 이유: SQL이 먼저 자르면 자른 조각 바깥에 있던
     국내 기사가 애초에 후보에도 못 들어 domestic-first가 무의미해진다.
+
+    **좋아요 개수(2026-08-24)**: fixed_keyword_id가 있으면(시장이 정해진
+    경우만 — 좋아요 자체가 "기사 × 시장" 단위라 시장 없이는 셀 게 없다)
+    분류기 점수 위에 좋아요 수를 한 번 더 앞세운다. 우선순위는 국내 매체 >
+    좋아요 수 > 분류기 점수 > 최신순이다.
     """
     if fixed_keyword_id is None:
         where, week_params = _week_filter(week_start)
@@ -296,6 +333,9 @@ def get_pool_articles(
         cur.execute(query, params)
         columns = [c.name for c in cur.description]
         rows = _apply_summary_truncation([dict(zip(columns, row)) for row in cur.fetchall()])
+    if fixed_keyword_id is not None:
+        rows = _apply_like_counts(conn, rows, fixed_keyword_id)
+        rows = _sort_by_like_count(rows)
     rows = _sort_domestic_first(rows)
     return rows[:limit] if limit is not None else rows
 

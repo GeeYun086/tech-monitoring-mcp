@@ -50,12 +50,16 @@ class _FakeCursor:
                     if r["fixed_keyword_id"] == fixed_keyword_id
                     and r["labeled_by"] == labeled_by]
             self._set(("url_norm",), rows)
-        elif "SELECT url_norm, label FROM article_labels" in query:
-            fixed_keyword_id, labeled_by = params
+        elif "GROUP BY url_norm" in query:
+            # fetch_like_counts — 사람(labeled_by)은 안 보고 (키워드, 라벨)로만
+            # 걸러 url_norm별 건수를 센다.
+            fixed_keyword_id, label = params
             rows = [r for r in self._labels()
-                    if r["fixed_keyword_id"] == fixed_keyword_id
-                    and r["labeled_by"] == labeled_by]
-            self._set(("url_norm", "label"), rows)
+                    if r["fixed_keyword_id"] == fixed_keyword_id and r["label"] == label]
+            counts: dict[str, int] = {}
+            for r in rows:
+                counts[r["url_norm"]] = counts.get(r["url_norm"], 0) + 1
+            self._rows = list(counts.items())
         elif "count(*) FROM article_labels" in query:
             # WHERE 절이 조건에 따라 붙었다 말았다 하므로 질의 문자열을 보고
             # params를 순서대로 꺼낸다(labeling.count_labels와 같은 순서).
@@ -382,35 +386,35 @@ def test_label_period_falls_back_to_run_week_without_publication_date():
     assert params[9] == date(2026, 8, 17)
 
 
-# --- 인라인 👍/👎 상태 조회(2026-08-24, 🏷️ 라벨링 탭 대체) -----------------
+# --- 좋아요 개수 집계(2026-08-24, 익명 인라인 👍/👎) -----------------------
+# 세션마다 무작위 labeled_by를 새로 발급하므로(app/streamlit_app.py) "누가"는
+# 안 보고 그냥 행 수만 센다 — fetch_label_map(사람 하나만 보던 이전 버전)을
+# 대체한다.
 
-def test_fetch_label_map_returns_url_norm_to_label():
-    """인라인 버튼이 지금 상태(토글 대상)를 알아야 한다 —
-    fetch_labeled_url_norms는 있다/없다만 알려줘서 부족하다."""
+def test_fetch_like_counts_counts_regardless_of_labeler():
     conn = _FakeConn(article_labels=[
-        _label_row("u1", label="relevant"),
-        _label_row("u2", label="irrelevant"),
+        _label_row("u1", label="relevant", labeled_by="랜덤토큰1"),
+        _label_row("u1", label="relevant", labeled_by="랜덤토큰2"),
+        _label_row("u2", label="relevant", labeled_by="랜덤토큰3"),
     ])
 
-    assert labeling.fetch_label_map(conn, fixed_keyword_id=1) == {
-        "u1": "relevant", "u2": "irrelevant",
-    }
+    assert labeling.fetch_like_counts(conn, fixed_keyword_id=1) == {"u1": 2, "u2": 1}
 
 
-def test_fetch_label_map_scoped_to_keyword_and_labeler():
+def test_fetch_like_counts_scoped_to_keyword_and_label():
     conn = _FakeConn(article_labels=[
-        _label_row("mine", label="relevant"),
-        _label_row("other-person", label="relevant", labeled_by="동료"),
-        _label_row("other-market", label="relevant", fixed_keyword_id=2),
+        _label_row("mine", label="relevant", labeled_by="a"),
+        _label_row("mine", label="irrelevant", labeled_by="b"),  # 다른 라벨 — 안 셈
+        _label_row("other-market", label="relevant", fixed_keyword_id=2, labeled_by="c"),
     ])
 
-    assert labeling.fetch_label_map(conn, fixed_keyword_id=1) == {"mine": "relevant"}
+    assert labeling.fetch_like_counts(conn, fixed_keyword_id=1) == {"mine": 1}
 
 
-def test_fetch_label_map_empty_when_nothing_labeled():
+def test_fetch_like_counts_empty_when_nothing_labeled():
     conn = _FakeConn(article_labels=[])
 
-    assert labeling.fetch_label_map(conn, fixed_keyword_id=1) == {}
+    assert labeling.fetch_like_counts(conn, fixed_keyword_id=1) == {}
 
 
 # --- 라벨 검토·수정(작업 5) -------------------------------------------------

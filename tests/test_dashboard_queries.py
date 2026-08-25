@@ -15,12 +15,16 @@ _COLS_BY_TABLE = {
     # score는 007에서 붙은 시장별 분류기 점수(LEFT JOIN으로 딸려온다).
     "collected_articles": ("title", "url", "snippet", "source_domain", "published_at",
                            "source_name", "score"),
+    # 좋아요 개수 집계(2026-08-24, labeling.fetch_like_counts) — url_norm별
+    # 건수만 돌려준다. 픽스처에 article_labels를 안 넣은 테스트는 빈 리스트로
+    # 취급되어 모든 기사의 좋아요가 0건이 된다(기존 정렬을 안 건드림).
+    "article_labels": ("url_norm", "count"),
 }
 
 
 # 판정 우선순위 — 서브쿼리에 딸려 나오는 이름보다 바깥 FROM이 먼저 잡히게.
-_TABLE_PRIORITY = ("collected_articles", "search_results", "market_keywords",
-                   "weekly_runs", "fixed_keywords")
+_TABLE_PRIORITY = ("article_labels", "collected_articles", "search_results",
+                   "market_keywords", "weekly_runs", "fixed_keywords")
 
 
 def _sort_by_published_at_desc_nulls_last(rows: list[dict]) -> list[dict]:
@@ -49,7 +53,16 @@ class _FakeCursor:
         cols = _COLS_BY_TABLE[table]
         self.description = [type("Col", (), {"name": n})() for n in cols]
 
-        if table == "weekly_runs":
+        if table == "article_labels":
+            fixed_keyword_id, label = params
+            rows = [r for r in self._tables.get("article_labels", [])
+                    if r["fixed_keyword_id"] == fixed_keyword_id and r["label"] == label]
+            counts: dict[str, int] = {}
+            for r in rows:
+                counts[r["url_norm"]] = counts.get(r["url_norm"], 0) + 1
+            self._rows = list(counts.items())
+            return
+        elif table == "weekly_runs":
             rows = sorted(self._tables.get("weekly_runs", []), key=lambda r: -r["id"])[:1]
         elif table == "fixed_keywords":
             rows = sorted(self._tables.get("fixed_keywords", []), key=lambda r: (r["display_order"], r["id"]))
@@ -586,3 +599,94 @@ def test_ordering_says_classifier_if_any_article_is_scored():
     articles = [{"score": None}, {"score": 0.7}]
 
     assert "분류기" in dq.describe_ordering(articles)
+
+
+def test_ordering_mentions_likes_only_when_any_article_has_them():
+    assert "좋아요" not in dq.describe_ordering([{"score": 0.5, "like_count": 0}])
+    assert "좋아요" in dq.describe_ordering([{"score": 0.5, "like_count": 3}])
+
+
+# --- 좋아요 개수(2026-08-24, 익명 인라인 👍/👎) ------------------------------
+
+def _label_row(url_norm, *, fixed_keyword_id=1, label="relevant"):
+    return {"url_norm": url_norm, "fixed_keyword_id": fixed_keyword_id, "label": label}
+
+
+def test_get_pool_articles_puts_more_liked_articles_first():
+    conn = _FakeConn(
+        collected_articles=[
+            _pool_row("https://a.com/few", title="적음", published_at=datetime(2026, 8, 19)),
+            _pool_row("https://a.com/many", title="많음", published_at=datetime(2026, 8, 10)),
+        ],
+        article_labels=[
+            _label_row("https://a.com/few"),
+            _label_row("https://a.com/many"),
+            _label_row("https://a.com/many"),
+            _label_row("https://a.com/many"),
+        ],
+    )
+
+    result = dq.get_pool_articles(conn, run_id=1, fixed_keyword_id=1)
+
+    assert [r["title"] for r in result] == ["많음", "적음"]
+    assert result[0]["like_count"] == 3
+    assert result[1]["like_count"] == 1
+
+
+def test_get_pool_articles_counts_likes_regardless_of_who_clicked():
+    """사람은 안 본다 — labeled_by가 뭐든 같은 기사면 다 더해진다(무작위
+    익명 토큰이라 애초에 셀 수도 없다)."""
+    conn = _FakeConn(
+        collected_articles=[_pool_row("https://a.com/1", title="기사")],
+        article_labels=[
+            {"url_norm": "https://a.com/1", "fixed_keyword_id": 1, "label": "relevant",
+             "labeled_by": "랜덤토큰1"},
+            {"url_norm": "https://a.com/1", "fixed_keyword_id": 1, "label": "relevant",
+             "labeled_by": "랜덤토큰2"},
+        ],
+    )
+
+    (result,) = dq.get_pool_articles(conn, run_id=1, fixed_keyword_id=1)
+
+    assert result["like_count"] == 2
+
+
+def test_get_pool_articles_ignores_dislikes_and_other_markets_for_like_count():
+    conn = _FakeConn(
+        collected_articles=[_pool_row("https://a.com/1", title="기사")],
+        article_labels=[
+            _label_row("https://a.com/1", label="irrelevant"),          # 싫어요는 안 셈
+            _label_row("https://a.com/1", fixed_keyword_id=2),          # 다른 시장은 안 셈
+        ],
+    )
+
+    (result,) = dq.get_pool_articles(conn, run_id=1, fixed_keyword_id=1)
+
+    assert result["like_count"] == 0
+    assert result["dislike_count"] == 1
+
+
+def test_get_pool_articles_like_count_wins_over_domestic_first():
+    """우선순위는 국내 매체 > 좋아요 수다 — 좋아요가 국내/해외 구분보다
+    아래여야 "해외 기사에 묻힌다"던 원래 불만이 되풀이되지 않는다."""
+    conn = _FakeConn(
+        collected_articles=[
+            _pool_row("https://a.com/kr", title="국내-좋아요0", source_domain="aitimes.com"),
+            _pool_row("https://a.com/en", title="해외-좋아요5", source_domain="techcrunch.com"),
+        ],
+        article_labels=[_label_row("https://a.com/en") for _ in range(5)],
+    )
+
+    result = dq.get_pool_articles(conn, run_id=1, fixed_keyword_id=1)
+
+    assert [r["title"] for r in result] == ["국내-좋아요0", "해외-좋아요5"]
+
+
+def test_get_pool_articles_like_count_defaults_to_zero_without_fixed_keyword():
+    """시장이 안 정해지면(fixed_keyword_id=None) 좋아요를 셀 기준이 없다 —
+    조용히 0으로 두고 죽지 않아야 한다."""
+    conn = _FakeConn(collected_articles=[_pool_row("https://a.com/1")])
+
+    (result,) = dq.get_pool_articles(conn, run_id=1)
+
+    assert "like_count" not in result
