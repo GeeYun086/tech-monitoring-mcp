@@ -451,58 +451,26 @@ def _render_performance_tab(conn) -> None:
     )
 
 
-@st.cache_data(show_spinner="기사 임베딩 계산 중… (같은 목록은 처음 검색할 때만, 몇 초 걸립니다)")
-def _pool_embeddings(cache_key: tuple, _articles: list[dict]):
-    """기사 목록을 문장 임베딩으로 미리 변환해 캐시한다.
+def _search_by_keyword(articles: list[dict], query: str) -> list[dict]:
+    """제목·요약에 검색어가 그대로 들어있는 기사만 찾는다(2026-08-25,
+    임베딩 방식에서 되돌림).
 
-    **캐시 키는 run_id가 아니라 기사 URL 튜플이다(2026-08-24 버그 수정)** —
-    run_id만으로 캐시하면, 같은 run 안에서도 화면에 보여주는 articles 길이가
-    달라지는 상황(당시엔 주차 선택 드롭다운이 있어 전체 415건 보다가 특정
-    주만 골라 92건이 되는 식이었다 — 그 드롭다운은 이후 없앴지만 캐시 키를
-    articles 내용 자체로 잡는 게 근본적으로 더 안전하다는 교훈은 남는다)를
-    못 잡아서, 이전에 캐시된 415개짜리 임베딩을 그대로 돌려줘 아래 유사도
-    계산에서 길이가 안 맞아 IndexError가 났다(실사용 중 발견). URL 튜플로
-    잡으면 목록이 바뀔 때마다 정확히 다시 계산된다(articles 자체는 앞에
-    밑줄 — 리스트라 해시 불가, dashboard_queries.py의 다른 캐시 함수들과
-    같은 관례). 검색할 때마다 다시 인코딩하면 매번 몇 초씩 걸리는데, 이렇게
-    하면 같은 목록에 대한 첫 검색에만 비용을 치른다."""
-    from tech_monitoring.relevance_model import encode_texts
-
-    texts = [f"{a['title']} {a.get('snippet') or ''}".strip() for a in _articles]
-    return encode_texts(texts)
-
-
-def _search_by_keyword(
-    articles: list[dict], query: str, *, top_k: int = 50, min_similarity: float = 0.2,
-) -> list[dict] | None:
-    """자유 키워드와 뜻이 비슷한 기사를 찾는다(2026-08-24 — 고정 키워드
-    드롭다운 대신 도입. market_keywords가 더 이상 안 채워지기도 하고, 담당자
-    피드백대로 "정확히 일치 안 해도 관련 있으면" 찾아주는 쪽이 더 유용하다).
-
-    문자열 포함 검사(ILIKE)가 아니라 문장 임베딩 코사인 유사도를 쓴다 —
-    "생성형 AI"를 검색해도 "LLM", "챗봇" 같은 다른 표현의 기사까지 걸리게
-    하려는 목적이라 정확 일치로는 안 된다. sentence-transformers가 없으면
-    (선택 설치, pyproject의 [embedding] extra) None을 돌려줘 호출부가
-    "검색 기능을 못 쓴다"고 알리게 한다 — 조용히 빈 결과를 주면 "관련
-    기사가 없다"로 오해한다.
-    """
-    import numpy as np
-
-    try:
-        cache_key = tuple(a["url"] for a in articles)
-        doc_vecs = _pool_embeddings(cache_key, articles)
-        from tech_monitoring.relevance_model import encode_texts
-
-        query_vec = encode_texts([query])[0]
-    except ImportError:
-        return None
-
-    doc_norms = np.linalg.norm(doc_vecs, axis=1)
-    query_norm = np.linalg.norm(query_vec)
-    similarities = (doc_vecs @ query_vec) / (doc_norms * query_norm + 1e-9)
-
-    order = np.argsort(-similarities)
-    return [articles[i] for i in order if similarities[i] >= min_similarity][:top_k]
+    **원래는(2026-08-24) 문장 임베딩 코사인 유사도 방식이었다** — "생성형
+    AI"를 검색해도 "LLM" 같은 다른 표현까지 걸리게 하려는 목적이었다.
+    그런데 그 방식은 sentence-transformers(선택 설치, pyproject의
+    [embedding] extra)가 있어야 도는데, **배포 환경(Streamlit Cloud)엔
+    일부러 안 깔려 있다**(torch 527MB+모델 458MB가 무료 티어엔 너무 커서 —
+    requirements.txt 헤더 참고). 그 결과 배포된 화면에서는 검색을 누를
+    때마다 "임베딩 라이브러리가 필요하다"는 안내만 뜨고 실제로는 전혀
+    작동하지 않았다 — 담당자 확인 후 "완전 일치가 안 되더라도 배포 환경에서
+    실제로 동작하는 쪽"으로 되돌리기로 했다. 대소문자 구분 없이 부분 문자열
+    포함 여부만 본다 — 별도 라이브러리가 필요 없어 배포 환경에서도 항상
+    동작한다."""
+    needle = query.lower()
+    return [
+        a for a in articles
+        if needle in (a["title"] or "").lower() or needle in (a.get("snippet") or "").lower()
+    ]
 
 
 def _render_keyword_tab(conn, run_id: int, fixed_keyword: dict, period_start) -> None:
@@ -515,22 +483,15 @@ def _render_keyword_tab(conn, run_id: int, fixed_keyword: dict, period_start) ->
     articles = dq.get_pool_articles(conn, run_id, fixed_keyword["id"])
 
     query = st.text_input(
-        "키워드로 검색(완전히 같은 단어가 아니어도 뜻이 비슷하면 찾아줍니다)",
+        "키워드로 검색(제목·요약에 그 단어가 그대로 들어있는 기사만 찾습니다)",
         key=f"kw_search_{fixed_keyword['id']}",
-        placeholder="예: 생성형 AI 도입 사례",
+        placeholder="예: 생성형 AI",
     )
     if query.strip():
-        matched = _search_by_keyword(articles, query.strip())
-        if matched is None:
-            st.info(
-                "검색 기능을 쓰려면 문장 임베딩 라이브러리가 필요합니다 — "
-                'pip install -e ".[embedding]"'
-            )
-        else:
-            articles = matched
-            st.caption(f"'{query.strip()}'와(과) 관련된 기사 {len(articles)}건 · 유사도순")
-            _render_feedback_article_list(conn, fixed_keyword, articles, period_start)
-            return
+        articles = _search_by_keyword(articles, query.strip())
+        st.caption(f"'{query.strip()}'이(가) 포함된 기사 {len(articles)}건")
+        _render_feedback_article_list(conn, fixed_keyword, articles, period_start)
+        return
 
     st.caption(f"{len(articles)}건 · 정렬: {dq.describe_ordering(articles)}")
     _render_feedback_article_list(conn, fixed_keyword, articles, period_start)
