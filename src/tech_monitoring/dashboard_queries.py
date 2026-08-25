@@ -124,9 +124,14 @@ def get_latest_run(conn) -> dict | None:
 
 
 def get_fixed_keywords(conn) -> list[dict]:
+    """활성 고정 키워드 목록. site_domains/search_terms_ko/en도 함께 돌려준다
+    (2026-08-25, 009 마이그레이션) — 화면(app/streamlit_app.py)이 이 값으로
+    "공용 기사 탭"과 "팀 전용 탭"(site_domains가 있으면 팀)을 구분하고,
+    팀 탭의 "지금 수집하기"가 그대로 collect_for_keyword에 넘겨 쓴다."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, keyword FROM fixed_keywords WHERE active ORDER BY display_order, id"
+            "SELECT id, keyword, site_domains, search_terms_ko, search_terms_en "
+            "FROM fixed_keywords WHERE active ORDER BY display_order, id"
         )
         columns = [c.name for c in cur.description]
         return [dict(zip(columns, row)) for row in cur.fetchall()]

@@ -8,7 +8,7 @@ from tech_monitoring import dashboard_queries as dq
 
 _COLS_BY_TABLE = {
     "weekly_runs": ("id", "period_start", "period_end", "status", "completed_at", "error_message"),
-    "fixed_keywords": ("id", "keyword"),
+    "fixed_keywords": ("id", "keyword", "site_domains", "search_terms_ko", "search_terms_en"),
     "market_keywords": ("canonical_phrase", "variant_phrases", "doc_count", "tfidf_score"),
     "search_results": ("title", "url", "snippet", "source_domain", "published_at", "rank"),
     # 006 공용 기사 풀 — 시장(fixed_keyword_id) 컬럼이 없다.

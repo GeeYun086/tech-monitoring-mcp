@@ -151,6 +151,19 @@ def test_terms_for_domain_falls_back_when_keys_missing():
     assert search_engine._terms_for_domain(kw, "aitimes.com") == ["교육"]
 
 
+def _patch_both_fetch_paths(monkeypatch, fake_news_topic, fake_no_news_topic=None):
+    """collect_for_keyword(collect_pool_for_site와 같은 이유, 2026-08-25)는
+    국내 도메인이면 _fetch_site_results_no_news_topic으로, 그 외엔
+    _fetch_site_results로 나뉘어 호출한다 — 테스트가 한쪽만 갈아끼우면
+    나머지 경로가 실제 네트워크를 타 버린다. 기본은 두 경로가 같은 동작을
+    하게(뒤의 start/end 인자만 무시) 묶어준다."""
+    monkeypatch.setattr(search_engine, "_fetch_site_results", fake_news_topic)
+    monkeypatch.setattr(
+        search_engine, "_fetch_site_results_no_news_topic",
+        fake_no_news_topic or (lambda term, domain: fake_news_topic(term, domain, _START, _END)),
+    )
+
+
 def test_collect_for_keyword_queries_once_per_term_per_site(monkeypatch):
     """검색어가 여러 개면 그 사이트에 대해 검색어 개수만큼 각각 호출해야 한다."""
     calls = []
@@ -159,7 +172,9 @@ def test_collect_for_keyword_queries_once_per_term_per_site(monkeypatch):
         calls.append((domain, term))
         return []
 
-    monkeypatch.setattr(search_engine, "_fetch_site_results", fake_fetch)
+    _patch_both_fetch_paths(
+        monkeypatch, fake_fetch, lambda term, domain: fake_fetch(term, domain, _START, _END),
+    )
 
     kw = {
         "id": 1, "keyword": "교육",
@@ -180,11 +195,11 @@ def test_collect_for_keyword_stores_actual_term_as_query(monkeypatch):
     """search_results.query엔 카테고리 이름("교육")이 아니라 실제로 검색에
     쓴 구체적인 검색어("에듀테크")가 남아야 한다 — 나중에 어느 검색어가
     이 기사를 찾아왔는지 추적할 수 있게."""
-    monkeypatch.setattr(
-        search_engine, "_fetch_site_results",
-        lambda term, domain, start_date, end_date: (
-            [_item("https://www.aitimes.com/news/x.html")] if domain == "aitimes.com" else []
-        ),
+    def fake_fetch(term, domain):
+        return [_item("https://www.aitimes.com/news/x.html")] if domain == "aitimes.com" else []
+
+    _patch_both_fetch_paths(
+        monkeypatch, lambda term, domain, s, e: fake_fetch(term, domain), fake_fetch,
     )
 
     conn = _FakeConn()
@@ -207,7 +222,9 @@ def test_collect_for_keyword_queries_each_site_domain_separately(monkeypatch):
         assert (start_date, end_date) == (_START, _END)
         return []
 
-    monkeypatch.setattr(search_engine, "_fetch_site_results", fake_fetch)
+    _patch_both_fetch_paths(
+        monkeypatch, fake_fetch, lambda keyword, domain: calls.append(domain) or [],
+    )
 
     search_engine.collect_for_keyword(
         _FakeConn(), run_id=1, fixed_keyword={"id": 1, "keyword": "에이전트 도입"},
@@ -217,15 +234,36 @@ def test_collect_for_keyword_queries_each_site_domain_separately(monkeypatch):
     assert calls == search_engine.SITE_DOMAINS
 
 
+def test_collect_for_keyword_only_uses_the_given_site_domains(monkeypatch):
+    """팀이 화면에서 사이트를 고르면(fixed_keyword["site_domains"]) 그 사이트만
+    돌아야 한다 — 안 그러면 "우리 팀은 이 사이트만" 설정이 무의미해진다."""
+    calls = []
+    _patch_both_fetch_paths(
+        monkeypatch,
+        lambda keyword, domain, s, e: calls.append(domain) or [],
+        lambda keyword, domain: calls.append(domain) or [],
+    )
+
+    search_engine.collect_for_keyword(
+        _FakeConn(), run_id=1,
+        fixed_keyword={"id": 1, "keyword": "콘텐츠팀", "site_domains": ["aitimes.com", "techcrunch.com"]},
+        start_date=_START, end_date=_END,
+    )
+
+    assert sorted(calls) == ["aitimes.com", "techcrunch.com"]
+
+
 def test_collect_for_keyword_stores_only_allowed_urls(monkeypatch):
     """Tavily가 도메인은 맞혀도 화이트리스트 경로 밖의 URL(예: techmeme.com/river)을
     돌려주면 저장 단계에서 다시 걸러져야 한다(이중 강제)."""
-    def fake_fetch(keyword, domain, start_date, end_date):
+    def fake_fetch(keyword, domain, *_rest):
         if domain == "techmeme.com":
             return [_item("https://www.techmeme.com/260813/p1"), _item("https://www.techmeme.com/river")]
         return []
 
-    monkeypatch.setattr(search_engine, "_fetch_site_results", fake_fetch)
+    _patch_both_fetch_paths(
+        monkeypatch, lambda k, d, s, e: fake_fetch(k, d), lambda k, d: fake_fetch(k, d),
+    )
 
     result = search_engine.collect_for_keyword(
         _FakeConn(), run_id=1, fixed_keyword={"id": 1, "keyword": "교육"}, start_date=_START, end_date=_END,
@@ -237,28 +275,35 @@ def test_collect_for_keyword_stores_only_allowed_urls(monkeypatch):
 
 
 def test_collect_for_keyword_dedups_same_url_across_sites(monkeypatch):
-    def fake_fetch(keyword, domain, start_date, end_date):
+    def fake_fetch(keyword, domain, *_rest):
         return [_item("https://techcrunch.com/2026/08/13/story/")]
 
-    monkeypatch.setattr(search_engine, "_fetch_site_results", fake_fetch)
+    _patch_both_fetch_paths(
+        monkeypatch, lambda k, d, s, e: fake_fetch(k, d), lambda k, d: fake_fetch(k, d),
+    )
 
     result = search_engine.collect_for_keyword(
         _FakeConn(), run_id=1, fixed_keyword={"id": 1, "keyword": "교육"}, start_date=_START, end_date=_END,
     )
 
-    # 6개 사이트 전부 같은 URL을 돌려줘도(스텁이라 실제로는 안 그러겠지만) 1건만 저장돼야 함
+    # 사이트 전부 같은 URL을 돌려줘도(스텁이라 실제로는 안 그러겠지만) 1건만 저장돼야 함
     assert result["inserted"] == 1
 
 
 def test_collect_for_keyword_returns_error_on_http_failure(monkeypatch):
-    """한 사이트 호출이 실패해도 예외를 던지지 않고 error 필드로 보고해야 한다(파이프라인 격리)."""
+    """한 사이트 호출이 실패해도 예외를 던지지 않고 error 필드로 보고해야 한다(파이프라인 격리).
+
+    영어 사이트(topic=news 경로)만으로도 이 동작을 검증할 수 있으므로,
+    국내 사이트를 배제해 영어 사이트만 쓰는 fixed_keyword로 좁힌다."""
     def fake_fetch(keyword, domain, start_date, end_date):
         raise httpx.HTTPError("boom")
 
     monkeypatch.setattr(search_engine, "_fetch_site_results", fake_fetch)
 
     result = search_engine.collect_for_keyword(
-        _FakeConn(), run_id=1, fixed_keyword={"id": 1, "keyword": "교육"}, start_date=_START, end_date=_END,
+        _FakeConn(), run_id=1,
+        fixed_keyword={"id": 1, "keyword": "교육", "site_domains": ["techcrunch.com"]},
+        start_date=_START, end_date=_END,
     )
 
     assert result["error"] == "boom"

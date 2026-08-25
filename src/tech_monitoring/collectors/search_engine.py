@@ -551,21 +551,36 @@ def _terms_for_domain(fixed_keyword: dict, domain: str) -> list[str]:
 def collect_for_keyword(
     conn, run_id: int, fixed_keyword: dict, start_date: date, end_date: date,
 ) -> dict:
-    """고정 키워드 하나에 대해 (화이트리스트 사이트 × 그 언어의 검색어) 조합마다
-    개별 호출 후 search_results에 저장. start_date/end_date는 이 run의 달력 주
-    (db/weekly_run.get_run_period)다.
+    """고정 키워드 하나에 대해 (사이트 × 그 언어의 검색어) 조합마다 개별 호출 후
+    search_results에 저장. start_date/end_date는 이 run의 달력 주(db/weekly_run.
+    get_run_period)다.
 
-    **파이프라인은 이 경로를 쓰지 않는다**(2026-08-19부터 collect_pool). 시장별
-    검색어로 정밀도를 보강하고 싶을 때를 위한 선택적 경로로 남겨둔다 — 실측상
-    이 방식만으로는 시장당 3~5건이라 라벨링·학습 물량이 안 나온다(006 헤더).
+    **파이프라인은 이 경로를 쓰지 않는다**(2026-08-19부터 collect_pool). 대신
+    2026-08-25부터 **팀별 자체 수집**(app/streamlit_app.py "새 팀 만들기") 이
+    이 경로를 쓴다 — 시장별 검색어로 정밀도를 보강하고 싶을 때를 위한 경로였는데,
+    실측상 넓은 질의(BROAD_QUERIES)만으로는 시장당 3~5건이라 라벨링·학습 물량이
+    안 나온다는 한계(006 헤더)가, 오히려 "이 팀만 보고 싶은 좁은 주제"에는 장점이
+    된다 — 넓게 긁지 않고 그 팀 검색어에 맞는 것만 모은다.
+
+    **사이트 목록도 팀마다 고를 수 있다**: `fixed_keyword.get("site_domains")`가
+    있으면 그 사이트들만 돈다(팀이 화면에서 고른 부분집합). 없으면(기존 호출부
+    호환) 전체 화이트리스트(SITE_DOMAINS)를 그대로 쓴다.
+
+    **국내 사이트는 topic="news" 경로를 안 쓴다** — collect_pool_for_site와
+    같은 이유(실측 2026-08-25: topic=news가 국내 매체 대부분에서 항상 0건,
+    `_fetch_site_results_no_news_topic` 헤더 참고)로 여기서도 똑같이 우회한다.
     """
     keyword = fixed_keyword["keyword"]
+    domains = fixed_keyword.get("site_domains") or SITE_DOMAINS
     fetched = inserted = 0
 
-    for domain in SITE_DOMAINS:
+    for domain in domains:
         for term in _terms_for_domain(fixed_keyword, domain):
             try:
-                items = _fetch_site_results(term, domain, start_date, end_date)
+                if domain in KOREAN_DOMAINS:
+                    items = _fetch_site_results_no_news_topic(term, domain)
+                else:
+                    items = _fetch_site_results(term, domain, start_date, end_date)
             except httpx.HTTPError as exc:
                 return {"fixed_keyword": keyword, "fetched": fetched, "inserted": inserted, "error": str(exc)}
 

@@ -140,12 +140,19 @@ _FEEDBACK_PAGE_SIZE = 30
 
 def _render_feedback_article_list(
     conn, fixed_keyword: dict, articles: list[dict], period_start,
+    *, source_table: str = "collected_articles",
 ) -> None:
     """기사 목록 + 행마다 인라인 👍/👎(2026-08-24, 🏷️ 라벨링 탭 대체).
 
     저장 자체는 예전과 똑같이 tech_monitoring.labeling을 그대로 쓴다 —
-    get_pool_articles가 돌려주는 행엔 없는 url_norm·source_table만 여기서
-    채워 넣는다(labeling.save_label이 요구하는 모양, labeling.py 헤더 참고).
+    호출부가 준 행엔 없는 url_norm·source_table만 여기서 채워 넣는다
+    (labeling.save_label이 요구하는 모양, labeling.py 헤더 참고).
+
+    **source_table(2026-08-25 추가)**: 공용 "기사" 탭은 collected_articles
+    에서 오지만, 팀별 자체 수집(_render_team_tab)은 search_results에서
+    온다 — 라벨 스냅샷에 어느 테이블 출신인지 정확히 남겨야
+    labeling.fetch_unlabeled_candidates 등 다른 경로와 맞물릴 때 헷갈리지
+    않는다.
 
     **익명 좋아요(2026-08-24 담당자 결정)**: 누가 눌렀는지 남기지 않고
     개수만 쌓이길 원해서, 클릭할 때마다 무작위 토큰을 labeled_by로 발급한다
@@ -236,7 +243,7 @@ def _render_feedback_article_list(
                     # 버튼으로 뒤집는 거면 방금 그 토큰을 그대로 재사용해
                     # save_label의 UPSERT가 같은 행을 덮어쓰게 한다.
                     token = my_vote["token"] if my_vote else secrets.token_hex(8)
-                    snapshot = {**a, "source_table": "collected_articles", "url_norm": url_norm}
+                    snapshot = {**a, "source_table": source_table, "url_norm": url_norm}
                     labeling.save_label(
                         conn, fixed_keyword["id"], snapshot, clicked, period_start, labeled_by=token,
                     )
@@ -505,6 +512,129 @@ def _render_keyword_tab(conn, run_id: int, fixed_keyword: dict, period_start) ->
     _render_feedback_article_list(conn, fixed_keyword, articles, period_start)
 
 
+def _render_team_tab(conn, run_id: int, fixed_keyword: dict, period_start, period_end) -> None:
+    """팀 전용 탭(2026-08-25, "새 팀 만들기"로 생성된 fixed_keyword).
+
+    공용 "기사" 탭과 다른 점 — **수집 자체가 이 팀만의 것**이다: 공용 풀
+    (collected_articles, 화이트리스트 전체 + 넓은 질의 "AI")을 같이 보는 게
+    아니라, 이 팀이 고른 사이트 + 이 팀의 검색어로만 별도 수집한
+    search_results를 본다(collectors.search_engine.collect_for_keyword).
+    그래서 좋아요·분류기 학습도 이 팀 데이터 안에서만 자연히 분리된다 —
+    담당자가 "각 팀이 독립된 공간을 쓰고 싶다"고 요청한 부분(2026-08-25).
+
+    "지금 수집하기" 버튼으로 즉시 실행한다 — 매주 자동 수집(pipeline_v2)은
+    공용 풀만 갱신하고 팀 수집은 안 건드리므로, 팀이 원할 때 직접 눌러야
+    한다(자동화하면 매주 팀 수만큼 Tavily 크레딧이 추가로 든다 — 필요할 때만
+    쓰는 게 무료 티어에 맞다)."""
+    from tech_monitoring.collectors.search_engine import SITE_NAMES, collect_for_keyword
+
+    sites = fixed_keyword.get("site_domains") or []
+    site_label = ", ".join(SITE_NAMES.get(d, d) for d in sites) or "(전체)"
+    st.markdown(f"**{fixed_keyword['keyword']} 전용 수집** — 검색 사이트: {site_label}")
+
+    if st.button("지금 수집하기", key=f"collect_{fixed_keyword['id']}"):
+        with st.spinner("수집 중… 사이트 수에 따라 1~2분 걸릴 수 있습니다"):
+            result = collect_for_keyword(conn, run_id, fixed_keyword, period_start, period_end)
+        if result["error"]:
+            st.error(f"수집 중 오류: {result['error']}")
+        else:
+            st.toast(f"{result['inserted']}건 수집됨(조회 {result['fetched']}건)", icon="✅")
+        st.rerun()
+
+    articles = dq.get_search_results(conn, run_id, fixed_keyword["id"])
+    # 좋아요 개수도 공용 탭과 같은 방식으로 붙인다(dashboard_queries._apply_
+    # like_counts는 url 목록만 있으면 되므로 collected_articles 전용이
+    # 아니다) — 안 붙이면 팀 탭 버튼에만 개수가 안 보이는 비일관이 생긴다.
+    articles = dq._apply_like_counts(conn, articles, fixed_keyword["id"])
+
+    query = st.text_input(
+        "키워드로 검색", key=f"team_search_{fixed_keyword['id']}", placeholder="예: 에듀테크",
+    )
+    if query.strip():
+        articles = _search_by_keyword(articles, query.strip())
+        st.caption(f"'{query.strip()}'와(과) 유사한 기사 {len(articles)}건")
+    else:
+        st.caption(f"{len(articles)}건 · 최신순")
+
+    _render_feedback_article_list(
+        conn, fixed_keyword, articles, period_start, source_table="search_results",
+    )
+
+
+def _render_new_team_form(conn) -> None:
+    """"새 팀 만들기"(2026-08-25) — 팀마다 독립된 검색어·사이트 조합으로
+    수집 공간을 만든다. fixed_keywords 한 행 = 팀 하나이고, 좋아요·분류기
+    학습이 이미 fixed_keyword_id 단위로 격리되던 기존 설계(labeling.py
+    헤더 참고)를 그대로 재사용한다 — 새 DB나 새 배포 없이 이 화면만으로
+    팀이 스스로 독립 공간을 만들 수 있다.
+
+    **사이트는 새로 추가할 수 없고, 이미 검증된 화이트리스트 중에서만
+    고른다** — 새 도메인마다 "진짜 기사 URL인지" 패턴을 사람이 한 번은
+    확인해야 하는데(collectors/search_engine.py의 is_allowed_url 헤더
+    참고), 그 검증 없이 아무 도메인이나 받으면 홈페이지·광고 페이지가
+    섞여 들어온다. 완전히 새 사이트가 필요하면 담당자에게 요청해 먼저
+    패턴을 검증받아야 한다."""
+    from tech_monitoring.collectors.search_engine import KOREAN_DOMAINS, SITE_DOMAINS, SITE_NAMES
+
+    st.subheader("➕ 새 팀 만들기")
+    st.caption(
+        "검색어와 사이트를 팀에 맞게 설정해 독립적인 수집 공간을 만듭니다 — "
+        "이 팀에서 누른 좋아요·학습된 분류기는 이 팀 안에서만 쓰입니다."
+    )
+
+    name = st.text_input("팀 이름", key="new_team_name", placeholder="예: 콘텐츠팀")
+    ko_terms = st.text_input(
+        "한국어 검색어(쉼표로 구분)", key="new_team_ko", placeholder="예: 에듀테크, AI 튜터",
+    )
+    en_terms = st.text_input(
+        "영어 검색어(쉼표로 구분)", key="new_team_en", placeholder="예: edtech AI, AI tutoring",
+    )
+    site_options = {d: SITE_NAMES.get(d, d) for d in SITE_DOMAINS}
+    selected_sites = st.multiselect(
+        "검색할 사이트(최소 1곳)",
+        options=list(site_options.keys()),
+        format_func=lambda d: site_options[d],
+        key="new_team_sites",
+    )
+
+    if st.button("팀 만들기", type="primary"):
+        ko_list = [t.strip() for t in ko_terms.split(",") if t.strip()]
+        en_list = [t.strip() for t in en_terms.split(",") if t.strip()]
+        # 국내/해외 사이트를 하나라도 골랐는데 그 언어 검색어가 비어있으면
+        # _terms_for_domain이 팀 이름 자체로 폴백한다 — "콘텐츠팀"처럼 검색
+        # 의도와 무관한 문자열이 그대로 질의로 나가 무의미한 결과만 쌓인다
+        # (실사용 중 확인, 2026-08-25). 여기서 미리 막는다.
+        has_korean_site = any(d in KOREAN_DOMAINS for d in selected_sites)
+        has_english_site = any(d not in KOREAN_DOMAINS for d in selected_sites)
+        if not name.strip():
+            st.error("팀 이름을 입력하세요.")
+        elif not selected_sites:
+            st.error("사이트를 최소 1곳 선택하세요.")
+        elif not ko_list and not en_list:
+            st.error("검색어를 최소 1개 입력하세요.")
+        elif has_korean_site and not ko_list:
+            st.error("국내 사이트를 고르셨으니 한국어 검색어도 입력하세요 — 비워두면 팀 이름이 그대로 검색어로 나가 결과가 무의미해집니다.")
+        elif has_english_site and not en_list:
+            st.error("해외 사이트를 고르셨으니 영어 검색어도 입력하세요 — 비워두면 팀 이름이 그대로 검색어로 나가 결과가 무의미해집니다.")
+        else:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO fixed_keywords
+                        (keyword, display_order, active, search_terms_ko, search_terms_en, site_domains)
+                    VALUES (%s, 100, TRUE, %s, %s, %s)
+                    ON CONFLICT (keyword) DO UPDATE SET
+                        active = TRUE,
+                        search_terms_ko = EXCLUDED.search_terms_ko,
+                        search_terms_en = EXCLUDED.search_terms_en,
+                        site_domains = EXCLUDED.site_domains
+                    """,
+                    (name.strip(), ko_list, en_list, selected_sites),
+                )
+            st.success(f"'{name.strip()}' 팀을 만들었습니다 — 위에서 탭을 눌러 바로 수집을 시작하세요.")
+            st.rerun()
+
+
 def main() -> None:
     st.title("AX 시장 모니터링")
 
@@ -522,7 +652,7 @@ def main() -> None:
     if run is None:
         return
 
-    period_start, _period_end = get_run_period(conn, run["id"])
+    period_start, period_end = get_run_period(conn, run["id"])
 
     # st.tabs가 아니라 segmented_control인 이유(2026-08-24) — st.tabs는 보이지
     # 않는 탭까지 매번 전부 다시 그린다. 기사 목록에 인라인 👍/👎가 붙은 뒤로
@@ -535,16 +665,25 @@ def main() -> None:
     # 그대로 유지된다(그 하나의 시장 안에서는 여전히 전부 보여준다).
     # 기사 목록이 기본 화면이라 앞에 둔다(2026-08-24 담당자 요청) — 성능은
     # 보조 지표라 뒤로.
-    options = [kw["keyword"] for kw in fixed_keywords] + ["📈 성능"]
+    # "➕ 새 팀"(2026-08-25) — 팀마다 독립된 검색어·사이트로 수집 공간을
+    # 스스로 만들 수 있게 한다(_render_new_team_form 헤더 참고).
+    options = [kw["keyword"] for kw in fixed_keywords] + ["📈 성능", "➕ 새 팀"]
     selected = st.segmented_control("보기", options, default=options[0], label_visibility="collapsed")
     if not selected:          # single-select라 같은 항목을 다시 누르면 선택 해제된다
         selected = options[0]
 
     if selected == "📈 성능":
         _render_performance_tab(conn)
+    elif selected == "➕ 새 팀":
+        _render_new_team_form(conn)
     else:
         kw = next(k for k in fixed_keywords if k["keyword"] == selected)
-        _render_keyword_tab(conn, run["id"], kw, period_start)
+        # site_domains가 있으면 팀 전용 수집(search_results) 탭이고,
+        # 없으면 기존 공용 풀("기사") 탭이다(_render_team_tab 헤더 참고).
+        if kw.get("site_domains"):
+            _render_team_tab(conn, run["id"], kw, period_start, period_end)
+        else:
+            _render_keyword_tab(conn, run["id"], kw, period_start)
 
 
 main()
