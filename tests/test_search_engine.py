@@ -344,6 +344,27 @@ def test_collect_all_still_needs_an_active_market(monkeypatch):
     assert "활성 키워드 없음" in result["error"]
 
 
+# ---- _fetch_site_results_no_news_topic (2026-08-25, topic="news" 국내 매체 우회) ----
+
+def test_fetch_site_results_no_news_topic_omits_topic_and_dates(monkeypatch):
+    """topic="news"가 국내 매체에서 안 통해서 만든 대체 경로다 — payload에
+    topic·start_date·end_date를 아예 안 넣어야 한다(넣으면 원래 경로와
+    같아져 버린다)."""
+    captured = {}
+    monkeypatch.setattr(
+        search_engine, "_tavily_request",
+        lambda payload: captured.update(payload) or {"results": []},
+    )
+
+    search_engine._fetch_site_results_no_news_topic("인공지능", "aitimes.com")
+
+    assert "topic" not in captured
+    assert "start_date" not in captured
+    assert "end_date" not in captured
+    assert captured["include_domains"] == ["aitimes.com"]
+    assert captured["query"] == "인공지능"
+
+
 # ---- collect_pool_for_site (006 공용 풀) ----
 
 def test_pool_queries_each_broad_query_once_per_site(monkeypatch):
@@ -360,16 +381,43 @@ def test_pool_queries_each_broad_query_once_per_site(monkeypatch):
 
 def test_pool_uses_korean_queries_for_korean_sites(monkeypatch):
     """영어 사이트에 한국어 질의를 던지면 Tavily가 그 도메인 무관 인기글로
-    채운다(003·006 실측) — 그래서 사이트 언어에 맞춰 질의를 고른다."""
+    채운다(003·006 실측) — 그래서 사이트 언어에 맞춰 질의를 고른다.
+
+    국내 사이트는 _fetch_site_results_no_news_topic 경로를 쓴다(2026-08-25,
+    아래 test_pool_korean_sites_skip_the_news_topic_path 참고) — 그래도
+    질의 자체는 여전히 언어별로 고른다."""
     calls = []
     monkeypatch.setattr(
-        search_engine, "_fetch_site_results",
-        lambda term, domain, start, end: calls.append(term) or [],
+        search_engine, "_fetch_site_results_no_news_topic",
+        lambda term, domain: calls.append(term) or [],
     )
 
     search_engine.collect_pool_for_site(_FakeConn(), 1, "aitimes.com", _START, _END)
 
     assert calls == search_engine.BROAD_QUERIES_KO
+
+
+def test_pool_korean_sites_skip_the_news_topic_path(monkeypatch):
+    """실측(2026-08-25): topic="news" + 날짜 범위로는 국내 매체(대형 언론사
+    포함)가 계정과 무관하게 항상 0건이었다 — 그래서 국내 사이트는 그 경로
+    (_fetch_site_results) 자체를 안 쓰고 _fetch_site_results_no_news_topic로
+    돌린다. 해외 사이트는 그대로 news topic 경로를 쓴다."""
+    news_topic_calls = []
+    no_news_topic_calls = []
+    monkeypatch.setattr(
+        search_engine, "_fetch_site_results",
+        lambda term, domain, start, end: news_topic_calls.append(domain) or [],
+    )
+    monkeypatch.setattr(
+        search_engine, "_fetch_site_results_no_news_topic",
+        lambda term, domain: no_news_topic_calls.append(domain) or [],
+    )
+
+    search_engine.collect_pool_for_site(_FakeConn(), 1, "aitimes.com", _START, _END)
+    search_engine.collect_pool_for_site(_FakeConn(), 1, "techcrunch.com", _START, _END)
+
+    assert no_news_topic_calls == ["aitimes.com"] * len(search_engine.BROAD_QUERIES_KO)
+    assert news_topic_calls == ["techcrunch.com"] * len(search_engine.BROAD_QUERIES_EN)
 
 
 def test_pool_stores_without_market_and_marks_fetch_method(monkeypatch):
@@ -419,10 +467,10 @@ def test_pool_dedups_same_article_across_broad_queries(monkeypatch):
 def test_pool_returns_error_on_http_failure_without_raising(monkeypatch):
     """한 사이트가 죽어도 나머지 사이트는 계속 진행해야 하므로 예외를 올리지
     않고 error에 담아 리턴한다(파이프라인이 stage_errors로 드러낸다)."""
-    def _boom(term, domain, start, end):
+    def _boom(term, domain):
         raise httpx.ConnectError("boom")
 
-    monkeypatch.setattr(search_engine, "_fetch_site_results", _boom)
+    monkeypatch.setattr(search_engine, "_fetch_site_results_no_news_topic", _boom)
 
     result = search_engine.collect_pool_for_site(_FakeConn(), 1, "aitimes.com", _START, _END)
 
@@ -515,22 +563,28 @@ def test_pool_skips_duplicate_titles_from_different_urls(monkeypatch):
     assert [p[2] for p in conn.inserted_params] == ["같은 헤드라인"]
 
 
-def test_pool_skips_articles_without_a_publication_date(monkeypatch):
-    """발행일이 없으면 담지 않는다(2026-08-19 담당자 결정).
+def test_pool_keeps_articles_without_a_publication_date(monkeypatch):
+    """발행일 없는 기사도 담는다(2026-08-25, 뒤집힌 결정).
 
-    주차가 이 프로젝트의 기준축이라서다 — 화면의 주차 선택, 라벨의 주차 그룹,
-    모델 평가의 fold 분리가 전부 발행 주로 돌아간다. 날짜가 없는 기사만 어느
-    주에도 속하지 않아 "날짜 미상" 칸이 따로 생기고, 라벨의 주차는 수집 주로
-    폴백해 실제 발행 시점과 어긋난다(실측 221건 중 10건뿐이라 예외 경로를
-    유지하는 복잡도가 얻는 것보다 컸다)."""
-    monkeypatch.setattr(search_engine, "_fetch_site_results", lambda term, domain, start, end: [
-        _item("https://techcrunch.com/2026/08/13/dated/"),
-        _item("https://techcrunch.com/2026/08/13/undated/", published_date=None),
-    ])
+    2026-08-19엔 반대로 "발행일 없으면 아예 안 담는다"였다 — 그런데
+    2026-08-25 실측으로 topic="news" 경로가 국내 매체 대부분에서 항상
+    0건임을 확인했고, 국내 매체는 그 경로 대신 _fetch_site_results_no_news_topic
+    (날짜 없음)로 돌리기로 했다(collect_pool_for_site 헤더 참고). 옛 규칙을
+    그대로 두면 국내 기사가 사실상 전부 버려져 수집이 안 되는 것과 같으므로,
+    발행일 없는 기사도 일단 담고 "날짜 미상" 버킷(labeling.UNDATED)으로
+    화면에 보이게 한다."""
+    # 제목을 서로 다르게 해야 한다 — _item()의 기본 제목이 같으면 제목 중복
+    # 제거(위 test_pool_skips_duplicate_titles_from_different_urls)에 걸려
+    # 날짜와 무관하게 하나만 남아 이 테스트가 뭘 검증하는지 흐려진다.
+    dated = {**_item("https://techcrunch.com/2026/08/13/dated/"), "title": "날짜 있는 기사"}
+    undated = {**_item("https://techcrunch.com/2026/08/13/undated/", published_date=None),
+               "title": "날짜 없는 기사"}
+    monkeypatch.setattr(search_engine, "_fetch_site_results",
+                         lambda term, domain, start, end: [dated, undated])
 
     result = search_engine.collect_pool_for_site(_FakeConn(), 1, "techcrunch.com", _START, _END)
 
-    assert result["inserted"] == 1        # 날짜 있는 것만
+    assert result["inserted"] == 2        # 날짜 있든 없든 둘 다
     assert result["fetched"] == 4         # 가져오긴 다 가져왔다(질의 2개 × 2건)
 
 
