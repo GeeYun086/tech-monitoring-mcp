@@ -387,6 +387,29 @@ def _fetch_site_results(keyword: str, domain: str, start_date: date, end_date: d
     return _tavily_request(payload).get("results", [])
 
 
+def _fetch_site_results_no_news_topic(keyword: str, domain: str) -> list[dict]:
+    """`topic="news"`가 이 도메인에서 안 통할 때 쓰는 대체 경로(2026-08-25 실측).
+
+    실측: `topic="news"` + `start_date`/`end_date`로 국내 매체(대형 언론사
+    포함 — 조선일보·한국경제·연합뉴스 등도 동일) 대부분이 항상 0건이었다.
+    같은 도메인이라도 `topic` 없이(날짜 없이) 검색하면 실제 기사가 정상
+    조회됐다(응답 시간도 즉시 0초 vs 국내 매체 쪽 4초+ — Tavily의 "news"
+    색인이 국내 매체를 잘 안 다루는 것으로 보인다. 계정을 새로 발급해도
+    동일해 계정 문제는 아니다).
+
+    대가: 이 경로는 Tavily가 `published_date`를 안 준다 — 그래서 날짜
+    범위 필터도 여기선 못 하고(호출부가 날짜로 좁히지 않는다), 저장 시
+    발행일이 없는 채로 들어간다(_insert_pool_article 참고, "날짜 미상"
+    버킷으로 화면에 보인다)."""
+    payload = {
+        "query": keyword,
+        "search_depth": "basic",
+        "max_results": RESULTS_PER_SITE,
+        "include_domains": [domain],
+    }
+    return _tavily_request(payload).get("results", [])
+
+
 def _insert_result(conn, *, run_id: int, fixed_keyword_id: int, query: str, rank: int, item: dict) -> bool:
     url = item.get("url")
     if not url:
@@ -432,20 +455,20 @@ def _insert_pool_article(conn, *, run_id: int, domain: str, query: str, item: di
     두 번 판단하게 된다. 정보를 버리는 게 아니라 같은 글을 한 번만 남기는
     것이라 URL 정규화와 같은 성격의 중복 제거다.
 
-    **발행일이 없는 기사는 아예 담지 않는다**(2026-08-19 담당자 결정). 이
-    프로젝트의 거의 모든 것이 "몇 주차 기사인가"를 기준으로 돌아간다 —
-    화면의 주차 선택, 라벨의 주차 그룹(labeling._label_period_start), 그리고
-    모델 평가의 fold 분리(relevance_model.build_groups)까지. 발행일이 없으면
-    그 기사만 어느 주에도 속하지 않아서, 화면엔 "날짜 미상"이라는 별도 칸이
-    생기고 라벨의 주차 그룹은 수집 주로 폴백해 실제 발행 시점과 어긋난다.
-    실측 2026-08-19 기준 221건 중 10건(4.5%)뿐이라, 예외 경로를 유지하는
-    복잡도가 얻는 것보다 크다고 판단했다."""
+    **발행일 없는 기사도 이제(2026-08-25) 담는다** — 예전엔(2026-08-19
+    결정) 아예 버렸었다. 뒤집은 이유: `topic="news"`가 국내 매체 대부분에서
+    항상 0건이라(대형 언론사도 마찬가지, 위 `_fetch_site_results_no_news_topic`
+    헤더 참고) 국내 수집 자체를 그 경로로 돌렸는데, 그 경로는 애초에
+    `published_date`를 안 준다 — "발행일 없으면 버림" 규칙을 그대로 두면
+    국내 기사가 전부(사실상 100%) 버려져 수집이 아예 안 되는 것과 같다.
+    담당자 판단: "이번 주" 정확도(주차 분류·fold 분리)를 다소 잃더라도
+    국내 기사가 아예 안 모이는 것보다 낫다 — 화면엔 이미 있는 "날짜 미상"
+    버킷(labeling.UNDATED)으로 자연스럽게 보인다. 라벨의 주차 그룹은
+    (labeling._label_period_start처럼) 수집 주로 폴백한다."""
     url = item.get("url")
     if not url:
         return False
     published_at = _parse_published_date(item.get("published_date"))
-    if published_at is None:
-        return False
     title = derive_title(item, domain)
     with conn.cursor() as cur:
         cur.execute(
@@ -481,13 +504,26 @@ def collect_pool_for_site(
 
     한 사이트가 죽어도 다른 사이트는 계속 진행한다 — 실패는 error에 담아
     정상 리턴하고, 파이프라인이 pipeline_report.stage_errors로 실패를 드러낸다
-    (예외를 던지면 그 주 수집이 통째로 날아간다)."""
+    (예외를 던지면 그 주 수집이 통째로 날아간다).
+
+    **국내 매체는 `topic="news"` 경로를 안 쓴다(2026-08-25)** — 실측으로
+    그 경로가 국내 매체 대부분에서 항상 0건임을 확인했다(대형 언론사 포함,
+    새 Tavily 계정으로도 동일 — 계정 문제가 아니라 Tavily의 뉴스 색인이
+    국내 매체를 잘 안 다룬다는 뜻, `_fetch_site_results_no_news_topic` 헤더
+    참고). 그래서 `KOREAN_DOMAINS`는 `start_date`/`end_date` 없이 일반
+    검색으로 돌리고, 그 결과는 발행일 없이 저장된다(_insert_pool_article
+    참고) — start_date/end_date 인자를 그대로 받아두는 이유는 해외 매체
+    호출에 여전히 쓰이기 때문이다."""
     name = SITE_NAMES.get(domain, domain)
     fetched = inserted = 0
+    use_news_topic = domain not in KOREAN_DOMAINS
 
     for query in broad_queries_for_domain(domain):
         try:
-            items = _fetch_site_results(query, domain, start_date, end_date)
+            if use_news_topic:
+                items = _fetch_site_results(query, domain, start_date, end_date)
+            else:
+                items = _fetch_site_results_no_news_topic(query, domain)
         except httpx.HTTPError as exc:
             return {"source": name, "fetched": fetched, "inserted": inserted, "error": str(exc)}
 
