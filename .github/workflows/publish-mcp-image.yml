@@ -1,0 +1,76 @@
+# MCP 서버 이미지를 GHCR에 자동 배포(2026-08-25).
+#
+# Dockerfile(README "도커로 배포하기")은 진작부터 있었지만, 그동안은 받는
+# 사람이 매번 이 저장소를 클론해 `docker build`를 직접 돌려야 했다 — 그러면
+# "저장소를 안 열어도 된다"는 도커 배포의 장점이 반쯤 무의미해진다. 여기서
+# 미리 빌드해 GHCR(GitHub Container Registry)에 올려두면 팀원은 `docker pull`
+# 한 번으로 끝난다.
+#
+# **레지스트리로 GHCR을 고른 이유**: 이 저장소가 이미 GitHub에 있으니 별도
+# 계정·토큰 발급 없이 GITHUB_TOKEN 하나로 push까지 된다(Docker Hub였다면
+# 별도 계정과 access token을 secrets로 관리해야 한다).
+#
+# **트리거를 push(main)로 건 이유**: 이미지에 들어가는 건 src/tech_monitoring
+# 전체(Dockerfile이 통째로 COPY한다)라 그 안 어떤 파일이 바뀌어도 이미지가
+# 낡을 수 있다 — 매번 어떤 파일이 이미지에 영향을 주는지 따지는 대신, main에
+# 실제로 반영된 시점(=배포해도 되는 시점)에 맞춰 매번 새로 굽는다. Dockerfile
+# 자체가 바뀔 때도 당연히 다시 굽는다.
+
+name: MCP 이미지 배포
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/tech_monitoring/**"
+      - "Dockerfile"
+      - ".github/workflows/publish-mcp-image.yml"
+  workflow_dispatch:    # 필요할 때 수동으로도 다시 구울 수 있게
+
+concurrency:
+  group: publish-mcp-image
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # GHCR에 push하려면 packages: write가 있어야 한다(레포 기본 GITHUB_TOKEN
+    # 권한엔 없어 명시적으로 켠다).
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # GHCR 이미지 경로는 전부 소문자여야 한다(도커 레지스트리 공통 규칙).
+      # github.repository는 "GeeYun086/tech-monitoring-mcp"처럼 대문자가 섞여
+      # 나오므로 여기서 한 번 소문자로 내려 뒤에서 재사용한다.
+      - name: 이미지 이름 만들기(소문자로)
+        run: echo "IMAGE=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: GHCR 로그인
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # latest(항상 최신)와 커밋 SHA(그때 그 이미지를 다시 받고 싶을 때) 둘 다
+      # 태그해둔다 — latest만 있으면 "지난주에 받은 그 이미지"를 다시 못 찾는다.
+      - name: 빌드 + 푸시
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.sha }}
+          # 이 워크플로 자체가 처음 도는 시점엔 캐시가 없어 첫 빌드만 느리고,
+          # 그다음부터는 GHA 캐시로 의존성 레이어를 재사용한다.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
