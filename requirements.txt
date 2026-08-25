@@ -14,4 +14,17 @@
 # 임베딩 방식 비교는 개발 PC에서 한다:
 #   ./.venv/Scripts/python.exe -m pip install -e ".[embedding]"
 #   ./.venv/Scripts/python.exe scripts/train_relevance_classifier.py
-.
+#
+# **-e(editable)로 설치한다(2026-08-25 버그 수정)** — 예전엔 "."(일반 설치)
+# 였는데, 그러면 pip이 src/tech_monitoring을 site-packages에 그 시점 상태로
+# 복사해버린다. Streamlit Community Cloud는 이 파일(requirements.txt) 내용이
+# 안 바뀌면 git pull만 하고 의존성 재설치는 건너뛴다 — app/streamlit_app.py는
+# 매번 새로 읽어서 실행하지만(엔트리 스크립트라 항상 최신), `import
+# tech_monitoring`으로 들여오는 dashboard_queries.py·labeling.py 등은 예전에
+# 복사해둔 낡은 버전 그대로 남는다. 실사용 중 발견: 좋아요 버튼을 누르면
+# 저장은 됐는데(streamlit_app.py 안의 새 코드) 개수는 안 보였다(dashboard_
+# queries.get_pool_articles의 좋아요 집계 로직이 낡은 채로 남아 있었다) —
+# 딱 이 "엔트리 스크립트만 새것, 패키지는 헌것" 불일치 증상이었다. -e(editable)
+# 설치는 site-packages에 복사하지 않고 src/ 경로를 그대로 가리키므로, git pull만
+# 해도 패키지 코드가 항상 최신으로 반영된다.
+-e .
