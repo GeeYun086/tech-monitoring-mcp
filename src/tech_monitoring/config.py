@@ -1,3 +1,4 @@
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -5,6 +6,18 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     database_url: str = "postgresql://tm_user:tm_pass@localhost:5432/tech_monitoring"
+
+    # 실측(2026-08-25, GitHub Actions "주간 수집" 마이그레이션 실패): GitHub
+    # 저장소 시크릿에 DATABASE_URL을 등록할 때 값 끝에 개행이 하나 섞여 들어가
+    # 있으면, psycopg가 그 개행까지 데이터베이스 이름의 일부로 읽어
+    # `FATAL: database "postgres\n" does not exist`로 죽는다 — Supabase
+    # 자체는 멀쩡한데 시크릿 값에 섞인 눈에 안 보이는 문자 하나 때문에 매주
+    # 자동 수집이 통째로 실패하는, 원인을 알아채기 어려운 종류의 오류다.
+    # 값을 붙여넣을 때 흔히 딸려오는 실수라 여기서 한 번 걸러준다.
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _strip_whitespace(cls, value: str) -> str:
+        return value.strip() if isinstance(value, str) else value
 
     # Tavily Search API(2026-08-13 도입 — Google Custom Search JSON API가
     # 신규 계정에 폐쇄된 것을 확인한 뒤 교체, collectors/search_engine.py
