@@ -126,10 +126,11 @@ pg_dump -t article_labels --data-only <옛DB> | psql <공용Supabase>
 배포 설정:
 - Main file path: `app/streamlit_app.py`
 - Python: 3.12 (`pyproject.toml`의 `requires-python`)
-- Secrets: `DATABASE_URL`만 있으면 된다. **`TAVILY_API_KEY`는 이 앱엔 필요
-  없다** — 실시간 검색 호출이 없고(키워드 검색은 이미 모아둔 기사 안에서
-  TF-IDF로 찾는다), 수집 자체는 화면이 아니라 GitHub Actions
-  (`weekly-collect.yml`)가 한다(그쪽 저장소 시크릿에 따로 등록).
+- Secrets: `DATABASE_URL`·`TAVILY_API_KEY` 둘 다 필요하다. `TAVILY_API_KEY`는
+  평소 화면(키워드 검색은 이미 모아둔 기사 안에서 TF-IDF로 찾아 Tavily를
+  안 부른다)엔 안 쓰이지만, **첫 실행 설정 화면("처음 오셨네요")이 팀을
+  등록하는 그 자리에서 곧바로 첫 수집을 돌리기 때문에** 배포 환경에도
+  있어야 한다("고정 키워드 설정" 절 참고).
 - 무료 앱은 링크를 아는 누구나 들어오고 DB에 쓸 수 있다. 비공개(이메일 초대)
   설정을 쓰거나 링크를 사내에만 공유할 것.
 
@@ -260,26 +261,28 @@ Claude Desktop 등 다른 클라이언트는 아래처럼 등록한다(`DATABASE
 
 ## 고정 키워드(모니터링 대상 시장) 설정
 
-**한 배포 = 팀 하나다(2026-08-25 재설계).** 화면에 팀을 추가하는 기능은
-없다 — 배포하기 **전에** CLI로 팀 이름·검색어·사이트를 미리 정해두면, 그
-설정 그대로 매주 자동 수집되고 화면(링크)에 접속한 사람은 전부 같은 팀의
-기사만 본다. 다른 팀은 이 저장소를 통째로 포크해 따로 배포한다(아래
-"다른 팀이 독립적으로 배포하기" 참고) — 한 DB 안에 팀을 여러 개 두는
-방식이 아니다.
+**한 배포 = 팀 하나다(2026-08-25 재설계).** 팀 이름·검색어·사이트는
+**화면의 첫 실행 설정에서** 정한다 — `fixed_keywords`가 비어있으면
+`app/streamlit_app.py`가 CLI 없이 설정 화면을 바로 보여주고, 제출하면
+그 자리에서 첫 수집까지 끝낸다(`_render_first_run_setup` 참고). 한 번
+설정하고 나면 이 화면은 다시 안 뜨고, 그 뒤로는 매주 이 설정 그대로
+자동 수집된다. 다른 팀은 이 저장소를 통째로 포크해 따로 배포한다(아래
+"다른 팀이 독립적으로 배포하기" 참고) — 화면에서 팀을 더 추가하는
+기능은 없다.
+
+CLI(`scripts/manage_fixed_keywords.py`)는 **이미 설정된 팀을 나중에
+조정할 때**(이름 변경·검색어/사이트 재설정·비활성화)만 쓴다:
 
 ```bash
-./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py add "<팀 이름>" --order 1
+./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py list
 ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py set-terms "<팀 이름>" --ko "AI 교육,에듀테크" --en "AI education,edtech"
 ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py set-sites "<팀 이름>" --sites "aitimes.com,edu.donga.com"
-./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py list
 ```
 
-**주의**: `set-sites`는 **이미 검증된 화이트리스트 사이트 중에서만** 고를
-수 있다 — 완전히 새로운 사이트는 URL이 진짜 기사 페이지인지 사람이 한 번은
-확인해야 해서(아래 "새 수집 사이트 추가하기" 참고) 자동화돼 있지 않다.
-검색어를 안 정하면(신규 팀 기본값) 넓은 질의("AI"/"인공지능")로 폴백하고,
-사이트를 안 정하면 전체 화이트리스트를 쓴다 — 둘 다 생략해도 동작은 하지만
-팀 이름과 무관한 범용 결과만 나온다.
+**주의**: 사이트는 화면에서도 CLI에서도 **이미 검증된 화이트리스트
+중에서만** 고를 수 있다 — 완전히 새로운 사이트는 URL이 진짜 기사 페이지인지
+사람이 한 번은 확인해야 해서(아래 "새 수집 사이트 추가하기" 참고)
+자동화돼 있지 않다.
 
 ## 다른 팀이 독립적으로 배포하기
 
@@ -290,8 +293,8 @@ Claude Desktop 등 다른 클라이언트는 아래처럼 등록한다(`DATABASE
 **Claude Code한테 통째로 맡길 수는 없다** — 계정 생성(Supabase·Tavily)과
 발급받은 키를 GitHub/Streamlit Cloud Secrets에 입력하는 건 AI 에이전트가
 대신 할 수 없는 영역이다(자격증명 관련 행동 정책). 아래 1~3번(계정 만들고
-키 발급)만 사람이 직접 하고, 그다음(포크한 코드 손보기·마이그레이션·
-부트스트랩 실행)은 Claude Code에 시켜도 된다.
+키 발급)만 사람이 직접 하고, 그다음(포크한 코드 손보기·마이그레이션)은
+Claude Code에 시켜도 된다.
 
 1. **저장소 포크** — GitHub에서 Fork.
 2. **자기 Supabase 프로젝트 생성**(무료 티어) → `DATABASE_URL` 확보.
@@ -301,23 +304,19 @@ Claude Desktop 등 다른 클라이언트는 아래처럼 등록한다(`DATABASE
    ```bash
    ./.venv/Scripts/python.exe -m tech_monitoring.db.migrate
    ```
-5. **최초 부트스트랩(딱 한 번, 필수)** — 새 DB는 고정 키워드도 run(수집
-   회차)도 하나도 없어서, 이 단계를 건너뛰면 화면이 경고만 띄우고
-   아무것도 안 보인다(`app/streamlit_app.py`의 `main()`이 고정 키워드
-   0개·run 없음일 때 그 즉시 return하기 때문). 팀 이름·검색어·사이트를
-   먼저 정하고("고정 키워드 설정" 절의 3줄), 파이프라인을 한 번 수동
-   실행해 첫 수집분을 만든다:
-   ```bash
-   ./.venv/Scripts/python.exe -m tech_monitoring.pipeline_v2
-   ```
-6. **GitHub Actions 활성화** — 포크 저장소는 Actions가 기본적으로 꺼져 있다
+5. **GitHub Actions 활성화** — 포크 저장소는 Actions가 기본적으로 꺼져 있다
    (GitHub의 보안 기본값). 저장소의 Actions 탭에서 켠 뒤, Settings →
    Secrets and variables → Actions에 `DATABASE_URL`·`TAVILY_API_KEY`를
-   등록해야 `weekly-collect.yml`이 매주 월요일 이 팀의 설정 그대로
-   자동으로 돈다.
-7. **Streamlit Cloud에 자기 앱으로 배포** — 포크 저장소를 연결하고
-   `DATABASE_URL`을 Secrets에 등록한다("Streamlit Cloud 배포" 절 참고).
-   이 링크를 팀원에게 공유하면 접속한 사람 전부 같은 팀의 기사만 본다.
+   등록해야 `weekly-collect.yml`이 매주 월요일 자동으로 돈다.
+6. **Streamlit Cloud에 자기 앱으로 배포** — 포크 저장소를 연결하고
+   `DATABASE_URL`·`TAVILY_API_KEY`를 Secrets에 등록한다("Streamlit Cloud
+   배포" 절 참고 — 첫 실행 설정 화면이 그 자리에서 수집을 돌리므로
+   `TAVILY_API_KEY`가 배포 환경에도 있어야 한다).
+7. **링크를 열어 팀 설정** — 배포된 링크를 열면 "처음 오셨네요" 설정
+   화면이 뜬다. 팀 이름·검색어·사이트를 입력하고 "시작하기"를 누르면
+   등록과 동시에 첫 수집이 돈다(사이트·검색어 수에 따라 몇 분 걸릴 수
+   있음). 끝나면 이 링크를 팀원에게 공유한다 — 접속한 사람 전부 같은
+   팀의 기사·좋아요를 본다.
 
 ### 새 수집 사이트 추가하기
 

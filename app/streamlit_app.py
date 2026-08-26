@@ -514,6 +514,86 @@ def _render_keyword_tab(conn, run_id: int, fixed_keyword: dict, period_start) ->
     _render_feedback_article_list(conn, fixed_keyword, articles, period_start)
 
 
+def _render_first_run_setup(conn) -> None:
+    """첫 실행 화면(2026-08-25) — 팀 이름·검색어·사이트를 딱 한 번 여기서
+    정한다. `fixed_keywords`가 비어있을 때만 나타나고, 한 번 설정하고 나면
+    다시 안 뜬다 — "한 배포 = 팀 하나"라 팀을 더 추가하는 화면은 없다.
+    다른 팀은 이 저장소를 통째로 포크해 따로 배포한다(README "다른 팀이
+    독립적으로 배포하기" 참고). 배포하는 사람은 `.env`/Streamlit Cloud
+    Secrets에 `DATABASE_URL`·`TAVILY_API_KEY`만 넣고 이 화면을 열면 된다 —
+    CLI를 몰라도 여기서 전부 끝난다.
+
+    제출하면 팀을 등록하고 **그 자리에서 곧바로 첫 수집까지 돌린다**
+    (pipeline_v2.run_pipeline을 그대로 재사용 — 매주 자동 수집(GitHub
+    Actions)과 완전히 같은 경로를 타서 "수동 첫 실행"과 "자동 주간 수집"이
+    다른 코드로 갈라지지 않는다). 최초 실행은 3주치를 한 번에 걷는
+    부트스트랩이라(db/weekly_run.target_weeks) 사이트·검색어 수에 따라
+    몇 분 걸릴 수 있다."""
+    from tech_monitoring.collectors.search_engine import KOREAN_DOMAINS, SITE_DOMAINS, SITE_NAMES
+
+    st.subheader("처음 오셨네요 — 팀을 설정해주세요")
+    st.caption(
+        "여기서 정한 이름·검색어·사이트로 앞으로 매주 자동 수집됩니다. "
+        "이 화면은 지금 한 번만 나오고, 완료되면 이 팀의 기사 목록이 기본 화면이 됩니다 — "
+        "이 링크에 접속하는 팀원은 전부 같은 기사·좋아요를 보게 됩니다."
+    )
+
+    name = st.text_input("팀 이름", key="setup_team_name", placeholder="예: 콘텐츠팀")
+    ko_terms = st.text_input(
+        "한국어 검색어(쉼표로 구분)", key="setup_team_ko", placeholder="예: 에듀테크, AI 튜터",
+    )
+    en_terms = st.text_input(
+        "영어 검색어(쉼표로 구분)", key="setup_team_en", placeholder="예: edtech AI, AI tutoring",
+    )
+    site_options = {d: SITE_NAMES.get(d, d) for d in SITE_DOMAINS}
+    selected_sites = st.multiselect(
+        "검색할 사이트(최소 1곳)",
+        options=list(site_options.keys()),
+        format_func=lambda d: site_options[d],
+        key="setup_team_sites",
+    )
+
+    if st.button("시작하기", type="primary"):
+        ko_list = [t.strip() for t in ko_terms.split(",") if t.strip()]
+        en_list = [t.strip() for t in en_terms.split(",") if t.strip()]
+        # 국내/해외 사이트를 하나라도 골랐는데 그 언어 검색어가 비어있으면
+        # _terms_for_domain이 넓은 질의로 폴백해 팀 색깔이 안 드러난다 —
+        # 설정 단계에서 미리 막는다(실사용 중 발견, 2026-08-25).
+        has_korean_site = any(d in KOREAN_DOMAINS for d in selected_sites)
+        has_english_site = any(d not in KOREAN_DOMAINS for d in selected_sites)
+        if not name.strip():
+            st.error("팀 이름을 입력하세요.")
+        elif not selected_sites:
+            st.error("사이트를 최소 1곳 선택하세요.")
+        elif not ko_list and not en_list:
+            st.error("검색어를 최소 1개 입력하세요.")
+        elif has_korean_site and not ko_list:
+            st.error("국내 사이트를 고르셨으니 한국어 검색어도 입력하세요 — 비워두면 넓은 질의로 대체돼 팀 색깔이 안 드러납니다.")
+        elif has_english_site and not en_list:
+            st.error("해외 사이트를 고르셨으니 영어 검색어도 입력하세요 — 비워두면 넓은 질의로 대체돼 팀 색깔이 안 드러납니다.")
+        else:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO fixed_keywords
+                        (keyword, display_order, active, search_terms_ko, search_terms_en, site_domains)
+                    VALUES (%s, 0, TRUE, %s, %s, %s)
+                    """,
+                    (name.strip(), ko_list, en_list, selected_sites),
+                )
+            with st.spinner("첫 수집 중입니다… 사이트·검색어 수에 따라 몇 분 걸릴 수 있습니다"):
+                from tech_monitoring.pipeline_v2 import run_pipeline
+                report = run_pipeline()
+            if report["failed"]:
+                st.error(
+                    f"'{name.strip()}' 팀은 등록됐지만 수집 중 일부 실패했습니다: {report['failed']} — "
+                    "DATABASE_URL·TAVILY_API_KEY를 확인한 뒤 새로고침하면 다시 시도할 수 있습니다."
+                )
+            else:
+                st.success(f"'{name.strip()}' 팀이 설정됐고 첫 수집도 끝났습니다.")
+            st.rerun()
+
+
 def main() -> None:
     st.title("기사 모니터링")
 
@@ -523,12 +603,7 @@ def main() -> None:
 
     fixed_keywords = dq.get_fixed_keywords(conn)
     if not fixed_keywords:
-        st.warning(
-            "이 배포의 팀이 아직 설정되지 않았습니다. 배포 전 최초 1회, 팀 이름을 등록하세요:\n\n"
-            "`./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py add \"<팀 이름>\"`\n\n"
-            "검색어·사이트도 함께 정하려면 `set-terms`·`set-sites`를 이어서 실행하세요"
-            "(README \"다른 팀이 독립적으로 배포하기\" 참고)."
-        )
+        _render_first_run_setup(conn)
         return
     if run is None:
         st.info("아직 수집된 데이터가 없습니다. 첫 수집은 파이프라인을 한 번 실행해야 합니다.")
