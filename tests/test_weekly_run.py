@@ -12,7 +12,8 @@ class _SpyCursor:
         self._fetchone_result = fetchone_result
         self._fetchall_result = fetchall_result or []
         self.description = [
-            type("Col", (), {"name": n})() for n in ("id", "keyword", "search_terms_ko", "search_terms_en")
+            type("Col", (), {"name": n})()
+            for n in ("id", "keyword", "search_terms_ko", "search_terms_en", "site_domains")
         ]
 
     def __enter__(self):
@@ -41,19 +42,21 @@ class _SpyConn:
 
 def test_get_active_fixed_keywords_queries_active_only_ordered():
     cursor = _SpyCursor(fetchall_result=[
-        (1, "AX 시장", ["AX", "AI 전환"], ["AI transformation"]),
-        (2, "생성형 AI", [], []),
+        (1, "AX 시장", ["AX", "AI 전환"], ["AI transformation"], ["techcrunch.com"]),
+        (2, "생성형 AI", [], [], None),
     ])
     conn = _SpyConn(cursor)
 
     result = wr.get_active_fixed_keywords(conn)
 
     assert result == [
-        {"id": 1, "keyword": "AX 시장", "search_terms_ko": ["AX", "AI 전환"], "search_terms_en": ["AI transformation"]},
-        {"id": 2, "keyword": "생성형 AI", "search_terms_ko": [], "search_terms_en": []},
+        {"id": 1, "keyword": "AX 시장", "search_terms_ko": ["AX", "AI 전환"],
+         "search_terms_en": ["AI transformation"], "site_domains": ["techcrunch.com"]},
+        {"id": 2, "keyword": "생성형 AI", "search_terms_ko": [], "search_terms_en": [], "site_domains": None},
     ]
     query, params = cursor.executed[0]
     assert "search_terms_ko" in query and "search_terms_en" in query
+    assert "site_domains" in query
     assert "WHERE active" in query
     assert "ORDER BY display_order, id" in query
 

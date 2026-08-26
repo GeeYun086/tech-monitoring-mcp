@@ -7,9 +7,11 @@ from scripts.manage_fixed_keywords import (
     remove_keyword,
     set_active,
     set_search_terms,
+    set_sites,
 )
 
-_COLS = ("id", "keyword", "display_order", "active", "created_at", "search_terms_ko", "search_terms_en")
+_COLS = ("id", "keyword", "display_order", "active", "created_at",
+         "search_terms_ko", "search_terms_en", "site_domains")
 
 
 class _FakeCursor:
@@ -39,7 +41,7 @@ class _FakeCursor:
                 self._table.append({
                     "id": len(self._table) + 1, "keyword": keyword,
                     "display_order": display_order, "active": True, "created_at": None,
-                    "search_terms_ko": [], "search_terms_en": [],
+                    "search_terms_ko": [], "search_terms_en": [], "site_domains": None,
                 })
         elif query.startswith("UPDATE fixed_keywords SET active"):
             active, keyword = params
@@ -55,6 +57,13 @@ class _FakeCursor:
             if row is not None:
                 row["search_terms_ko"] = terms_ko
                 row["search_terms_en"] = terms_en
+                self._result_rows = [(row["id"],)]
+        elif query.startswith("UPDATE fixed_keywords SET site_domains"):
+            sites, keyword = params
+            row = next((r for r in self._table if r["keyword"] == keyword), None)
+            self._result_rows = []
+            if row is not None:
+                row["site_domains"] = sites
                 self._result_rows = [(row["id"],)]
         elif query.startswith("DELETE FROM fixed_keywords"):
             (keyword,) = params
@@ -142,3 +151,31 @@ def test_set_search_terms_updates_both_languages():
 def test_set_search_terms_returns_false_for_unknown_keyword():
     conn = _FakeConn()
     assert set_search_terms(conn, "없는 키워드", ["a"], ["b"]) is False
+
+
+def test_set_sites_updates_site_domains():
+    conn = _FakeConn(table=[
+        {"id": 1, "keyword": "콘텐츠팀", "display_order": 0, "active": True, "created_at": None,
+         "search_terms_ko": [], "search_terms_en": [], "site_domains": None},
+    ])
+    assert set_sites(conn, "콘텐츠팀", ["aitimes.com", "techcrunch.com"]) is True
+
+    row = list_keywords(conn)[0]
+    assert row["site_domains"] == ["aitimes.com", "techcrunch.com"]
+
+
+def test_set_sites_empty_list_falls_back_to_none():
+    """빈 목록은 NULL로 저장돼야 "전체 화이트리스트 사용"으로 폴백한다
+    (collect_all의 `site_domains or SITE_DOMAINS` 참고)."""
+    conn = _FakeConn(table=[
+        {"id": 1, "keyword": "콘텐츠팀", "display_order": 0, "active": True, "created_at": None,
+         "search_terms_ko": [], "search_terms_en": [], "site_domains": ["aitimes.com"]},
+    ])
+    assert set_sites(conn, "콘텐츠팀", []) is True
+
+    assert list_keywords(conn)[0]["site_domains"] is None
+
+
+def test_set_sites_returns_false_for_unknown_keyword():
+    conn = _FakeConn()
+    assert set_sites(conn, "없는 키워드", ["aitimes.com"]) is False

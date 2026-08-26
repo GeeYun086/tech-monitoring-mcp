@@ -1,6 +1,10 @@
 # tech-monitoring-mcp
 
-goormEDU 전략기획팀 **AX 시장 모니터링**.
+팀이 정한 검색어·사이트로 매주 기사를 모으고, 사람이 매긴 👍/👎로 학습한
+분류기가 순위를 매겨주는 **기사 모니터링** 도구. 원래 goormEDU 전략기획팀의
+AX(AI 전환) 시장 모니터링용으로 시작했지만, 팀마다 검색어·사이트·이름을
+따로 설정해 이 저장소를 포크해 쓸 수 있게 일반화됐다(2026-08-25, "다른 팀이
+독립적으로 배포하기" 참고).
 
 ## v2 아키텍처 (2026-08-13 피벗)
 
@@ -122,11 +126,10 @@ pg_dump -t article_labels --data-only <옛DB> | psql <공용Supabase>
 배포 설정:
 - Main file path: `app/streamlit_app.py`
 - Python: 3.12 (`pyproject.toml`의 `requires-python`)
-- Secrets: `DATABASE_URL`(필수). **`TAVILY_API_KEY`도 넣어야 "➕ 새 팀"의
-  "지금 수집하기" 버튼이 배포된 화면에서 바로 동작한다**(2026-08-25 추가
-  기능 — 없으면 그 버튼을 눌렀을 때 오류만 표시되고 조용히 실패하지는
-  않는다). 팀별 자체 수집을 안 쓸 계획이면 안 넣어도 나머지 화면(기사
-  목록·검색·좋아요)은 정상 동작한다.
+- Secrets: `DATABASE_URL`만 있으면 된다. **`TAVILY_API_KEY`는 이 앱엔 필요
+  없다** — 실시간 검색 호출이 없고(키워드 검색은 이미 모아둔 기사 안에서
+  TF-IDF로 찾는다), 수집 자체는 화면이 아니라 GitHub Actions
+  (`weekly-collect.yml`)가 한다(그쪽 저장소 시크릿에 따로 등록).
 - 무료 앱은 링크를 아는 누구나 들어오고 DB에 쓸 수 있다. 비공개(이메일 초대)
   설정을 쓰거나 링크를 사내에만 공유할 것.
 
@@ -257,32 +260,32 @@ Claude Desktop 등 다른 클라이언트는 아래처럼 등록한다(`DATABASE
 
 ## 고정 키워드(모니터링 대상 시장) 설정
 
-**화면에서 직접 만들 수 있다(2026-08-25, "➕ 새 팀").** 팀 이름·언어별
-검색어·검색할 사이트(기존 검증된 화이트리스트 중 선택)를 입력하면 바로
-그 팀만의 수집 공간이 생긴다 — 좋아요·분류기 학습이 팀마다 자동으로
-분리된다("다른 팀이 독립적으로 배포하기" 참고, 팀 안에서 여러 세부
-키워드를 나눌 때도 같은 화면을 쓴다).
-
-CLI로도 여전히 관리할 수 있다(화면에 없는 세부 조정, 예: `rename`,
-`deactivate`용):
+**한 배포 = 팀 하나다(2026-08-25 재설계).** 화면에 팀을 추가하는 기능은
+없다 — 배포하기 **전에** CLI로 팀 이름·검색어·사이트를 미리 정해두면, 그
+설정 그대로 매주 자동 수집되고 화면(링크)에 접속한 사람은 전부 같은 팀의
+기사만 본다. 다른 팀은 이 저장소를 통째로 포크해 따로 배포한다(아래
+"다른 팀이 독립적으로 배포하기" 참고) — 한 DB 안에 팀을 여러 개 두는
+방식이 아니다.
 
 ```bash
-./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py add "AX 시장" --order 1
+./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py add "<팀 이름>" --order 1
+./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py set-terms "<팀 이름>" --ko "AI 교육,에듀테크" --en "AI education,edtech"
+./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py set-sites "<팀 이름>" --sites "aitimes.com,edu.donga.com"
 ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py list
 ```
 
-**주의**: 화면(➕ 새 팀)은 **이미 검증된 화이트리스트 사이트 중에서만**
-고를 수 있다 — 완전히 새로운 사이트는 URL이 진짜 기사 페이지인지 사람이
-한 번은 확인해야 해서(아래 "새 수집 사이트 추가하기" 참고) 자동화돼
-있지 않다.
+**주의**: `set-sites`는 **이미 검증된 화이트리스트 사이트 중에서만** 고를
+수 있다 — 완전히 새로운 사이트는 URL이 진짜 기사 페이지인지 사람이 한 번은
+확인해야 해서(아래 "새 수집 사이트 추가하기" 참고) 자동화돼 있지 않다.
+검색어를 안 정하면(신규 팀 기본값) 넓은 질의("AI"/"인공지능")로 폴백하고,
+사이트를 안 정하면 전체 화이트리스트를 쓴다 — 둘 다 생략해도 동작은 하지만
+팀 이름과 무관한 범용 결과만 나온다.
 
 ## 다른 팀이 독립적으로 배포하기
 
-지금까지의 "➕ 새 팀"은 **같은 DB를 공유하는 팀들끼리** 검색어·사이트만
-따로 쓰는 방식이다(수집 결과는 같은 Supabase 안에, `fixed_keyword_id`로만
-갈린다). **완전히 다른 조직/예산으로 독립적으로 쓰고 싶은 팀**은 이 저장소를
-포크해서 자기 몫의 Supabase·Tavily 무료 티어로 따로 배포하면 된다 — 오히려
-이쪽이 무료 한도를 팀마다 새로 받는 셈이라 더 낫다.
+**완전히 다른 조직/예산으로 쓰고 싶은 팀**은 이 저장소를 포크해서 자기
+몫의 Supabase·Tavily 무료 티어로 따로 배포하면 된다 — 팀마다 무료 한도를
+새로 받는 셈이라 이쪽이 더 낫다. 그 포크 하나 = 그 팀 전용 배포다.
 
 **Claude Code한테 통째로 맡길 수는 없다** — 계정 생성(Supabase·Tavily)과
 발급받은 키를 GitHub/Streamlit Cloud Secrets에 입력하는 건 AI 에이전트가
@@ -299,27 +302,26 @@ CLI로도 여전히 관리할 수 있다(화면에 없는 세부 조정, 예: `r
    ./.venv/Scripts/python.exe -m tech_monitoring.db.migrate
    ```
 5. **최초 부트스트랩(딱 한 번, 필수)** — 새 DB는 고정 키워드도 run(수집
-   회차)도 하나도 없어서, 이 두 단계를 건너뛰면 화면이 경고만 띄우고
-   아무것도 안 보인다("➕ 새 팀"조차 안 뜬다 — `app/streamlit_app.py`의
-   `main()`이 고정 키워드 0개·run 없음일 때 그 즉시 return하기 때문):
+   회차)도 하나도 없어서, 이 단계를 건너뛰면 화면이 경고만 띄우고
+   아무것도 안 보인다(`app/streamlit_app.py`의 `main()`이 고정 키워드
+   0개·run 없음일 때 그 즉시 return하기 때문). 팀 이름·검색어·사이트를
+   먼저 정하고("고정 키워드 설정" 절의 3줄), 파이프라인을 한 번 수동
+   실행해 첫 수집분을 만든다:
    ```bash
-   ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py add "<팀 이름>"
    ./.venv/Scripts/python.exe -m tech_monitoring.pipeline_v2
    ```
-   이후로는 위 화면의 "➕ 새 팀"으로 세부 팀(키워드×사이트 조합)을 몇 개든
-   추가할 수 있다.
 6. **GitHub Actions 활성화** — 포크 저장소는 Actions가 기본적으로 꺼져 있다
    (GitHub의 보안 기본값). 저장소의 Actions 탭에서 켠 뒤, Settings →
    Secrets and variables → Actions에 `DATABASE_URL`·`TAVILY_API_KEY`를
-   등록해야 `weekly-collect.yml`이 매주 월요일 자동으로 돈다.
+   등록해야 `weekly-collect.yml`이 매주 월요일 이 팀의 설정 그대로
+   자동으로 돈다.
 7. **Streamlit Cloud에 자기 앱으로 배포** — 포크 저장소를 연결하고
-   `DATABASE_URL`을 Secrets에 등록한다("Streamlit Cloud 배포" 절 참고,
-   `LABELED_BY`는 이제 안 넣어도 된다 — 인라인 좋아요가 익명 토큰 방식으로
-   바뀌어(2026-08-24) 더는 안 쓰인다).
+   `DATABASE_URL`을 Secrets에 등록한다("Streamlit Cloud 배포" 절 참고).
+   이 링크를 팀원에게 공유하면 접속한 사람 전부 같은 팀의 기사만 본다.
 
 ### 새 수집 사이트 추가하기
 
-화면의 "➕ 새 팀"은 기존 화이트리스트 안에서만 고를 수 있다. 완전히 새로운
+`set-sites`는 기존 화이트리스트 안에서만 고를 수 있다. 완전히 새로운
 사이트를 추가하려면(코드 수정 필요):
 
 1. 그 사이트에서 실제 기사 URL 몇 개를 모아 공통 패턴을 확인한다(예:

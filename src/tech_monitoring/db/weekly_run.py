@@ -10,14 +10,21 @@ from datetime import date, timedelta
 
 
 def get_active_fixed_keywords(conn) -> list[dict]:
-    """search_terms_ko/en(2026-08-13 추가)도 함께 반환한다 — 실제 검색은
-    keyword 문자열 그대로가 아니라 이 언어별 동의어 목록으로 한다
-    (collectors/search_engine.py, db/migrations/003_multi_term_keywords.sql
-    헤더 주석 참고). 비어있으면 collect 쪽에서 keyword로 폴백한다."""
+    """search_terms_ko/en(2026-08-13 추가)·site_domains(2026-08-25 추가, 009
+    마이그레이션)도 함께 반환한다 — 실제 검색은 keyword 문자열 그대로가
+    아니라 이 언어별 동의어 목록으로 하고(collectors/search_engine.py,
+    003 헤더 참고), 어느 사이트를 돌지도 site_domains로 정한다(비어있으면
+    collect 쪽에서 전체 화이트리스트로 폴백).
+
+    **한 배포 = 팀 하나(2026-08-25 재설계)**: collect_all은 이 목록의
+    첫 번째(활성 키워드)를 "이 배포의 팀"으로 삼아 그 팀의 검색어·사이트로
+    수집한다 — 팀마다 레포를 통째로 포크해 따로 배포하는 모델이라
+    한 DB 안에 활성 키워드가 여럿 있는 상황을 더는 상정하지 않는다
+    (README "다른 팀이 독립적으로 배포하기" 참고)."""
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, keyword, search_terms_ko, search_terms_en FROM fixed_keywords "
-            "WHERE active ORDER BY display_order, id"
+            "SELECT id, keyword, search_terms_ko, search_terms_en, site_domains "
+            "FROM fixed_keywords WHERE active ORDER BY display_order, id"
         )
         columns = [c.name for c in cur.description]
         return [dict(zip(columns, row)) for row in cur.fetchall()]

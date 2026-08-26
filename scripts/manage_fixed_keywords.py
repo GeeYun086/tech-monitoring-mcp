@@ -6,18 +6,32 @@ Streamlit UI가 생기기 전까지 이 테이블을 직접 만지는 유일한 
 그래서 "매번 다시 넣어야 하는" 스크립트가 아니라 "최초 1회 + 가끔 조정"용이다.
 
     ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py list
-    ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py add "AX 시장" --order 1
-    ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py set-terms "교육" --ko "AI 교육,에듀테크" --en "AI education,edtech"
-    ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py deactivate "AX 시장"
-    ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py activate "AX 시장"
-    ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py remove "AX 시장"
-    ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py rename "AX 시장" "전체"
+    ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py add "콘텐츠팀" --order 1
+    ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py set-terms "콘텐츠팀" --ko "AI 교육,에듀테크" --en "AI education,edtech"
+    ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py set-sites "콘텐츠팀" --sites "aitimes.com,edu.donga.com"
+    ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py deactivate "콘텐츠팀"
+    ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py activate "콘텐츠팀"
+    ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py remove "콘텐츠팀"
+    ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py rename "콘텐츠팀" "콘텐츠제작팀"
+
+**한 배포 = 팀 하나(2026-08-25 재설계)** — 새 배포를 부트스트랩할 때는
+`add`로 팀 이름을 만들고, `set-terms`·`set-sites`로 그 팀의 검색어·사이트를
+정한 뒤 파이프라인을 처음 한 번 돌린다(README "다른 팀이 독립적으로
+배포하기" 참고). 그 뒤로는 화면(app/streamlit_app.py)이 그 설정 그대로
+매주 자동 수집한 기사를 보여준다 — 화면에서 팀을 더 추가하는 기능은 없다.
 
 set-terms(2026-08-13 추가): 실제 검색에 쓸 언어별 동의어 목록. keyword
 문자열 자체를 그대로 검색어로 쓰면 (1) 표현이 다르면 못 찾고 (2) 영어
 사이트엔 한국어라 아예 안 맞는 문제가 실사용 확인됐다(collectors/
 search_engine.py 모듈 docstring 참고) — 그래서 keyword는 "표시용 이름"
-으로 두고, 검색은 이 목록으로 한다.
+으로 두고, 검색은 이 목록으로 한다. 둘 다 비워두면(신규 팀 기본값) 넓은
+질의("AI"/"인공지능")로 폴백한다(2026-08-25 변경 — 예전엔 keyword 문자열
+자체로 폴백했는데, 팀 이름이 검색 의도와 무관한 경우가 많아 바꿨다).
+
+set-sites(2026-08-25 추가): 이 팀이 수집할 사이트. 비워두면 전체
+화이트리스트(collectors/search_engine.py의 SITE_DOMAINS)를 쓴다. 이미
+등록된 화이트리스트 중에서만 골라야 한다 — 완전히 새 사이트를 추가하려면
+코드 수정이 필요하다(README "새 수집 사이트 추가하기" 참고).
 """
 
 import argparse
@@ -35,7 +49,8 @@ sys.stderr.reconfigure(encoding="utf-8")
 def list_keywords(conn) -> list[dict]:
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT id, keyword, display_order, active, created_at, search_terms_ko, search_terms_en "
+            "SELECT id, keyword, display_order, active, created_at, "
+            "search_terms_ko, search_terms_en, site_domains "
             "FROM fixed_keywords ORDER BY display_order, id"
         )
         columns = [c.name for c in cur.description]
@@ -48,6 +63,22 @@ def set_search_terms(conn, keyword: str, terms_ko: list[str], terms_en: list[str
             "UPDATE fixed_keywords SET search_terms_ko = %s, search_terms_en = %s "
             "WHERE keyword = %s RETURNING id",
             (terms_ko, terms_en, keyword),
+        )
+        return cur.fetchone() is not None
+
+
+def set_sites(conn, keyword: str, sites: list[str]) -> bool:
+    """이 팀이 수집할 사이트 목록(2026-08-25, 009 마이그레이션).
+
+    빈 리스트를 주면 NULL로 저장돼 "전체 화이트리스트 사용"으로 폴백한다
+    (collectors/search_engine.py의 collect_all 참고) — 명시적으로 좁히고
+    싶을 때만 값을 준다. 도메인 문자열은 검증하지 않는다 — 이미 코드에
+    등록된 화이트리스트(collectors/search_engine.py의 SITE_DOMAINS) 중에서
+    골라야 실제로 수집된다."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE fixed_keywords SET site_domains = %s WHERE keyword = %s RETURNING id",
+            (sites or None, keyword),
         )
         return cur.fetchone() is not None
 
@@ -105,10 +136,12 @@ def _print_table(rows: list[dict]) -> None:
     for row in rows:
         status = "active" if row["active"] else "inactive"
         print(f"[{row['id']:>3}] {row['keyword']:<20} order={row['display_order']} ({status})")
-        ko = ", ".join(row.get("search_terms_ko") or []) or "(미등록 — keyword로 폴백)"
-        en = ", ".join(row.get("search_terms_en") or []) or "(미등록 — keyword로 폴백)"
+        ko = ", ".join(row.get("search_terms_ko") or []) or "(미등록 — 넓은 질의로 폴백)"
+        en = ", ".join(row.get("search_terms_en") or []) or "(미등록 — 넓은 질의로 폴백)"
+        sites = ", ".join(row.get("site_domains") or []) or "(미등록 — 전체 화이트리스트)"
         print(f"      ko: {ko}")
         print(f"      en: {en}")
+        print(f"      sites: {sites}")
 
 
 def main() -> None:
@@ -138,6 +171,17 @@ def main() -> None:
     terms_parser.add_argument("keyword")
     terms_parser.add_argument("--ko", default="", help="한국어 검색어, 쉼표로 구분")
     terms_parser.add_argument("--en", default="", help="영어 검색어, 쉼표로 구분")
+
+    sites_parser = sub.add_parser(
+        "set-sites",
+        help="이 팀이 수집할 사이트 목록 설정(비우면 전체 화이트리스트로 폴백)",
+    )
+    sites_parser.add_argument("keyword")
+    sites_parser.add_argument(
+        "--sites", default="",
+        help="쉼표로 구분한 도메인(collectors/search_engine.py의 SITE_DOMAINS 중에서), "
+             "예: aitimes.com,techcrunch.com. 비우면 전체 사용",
+    )
 
     args = parser.parse_args()
     conn = get_connection()
@@ -174,6 +218,12 @@ def main() -> None:
                 print(f"'{args.keyword}'를 찾을 수 없음", file=sys.stderr)
                 sys.exit(1)
             print(f"검색어 설정됨: {args.keyword} (ko={terms_ko}, en={terms_en})")
+        elif args.command == "set-sites":
+            sites = [s.strip() for s in args.sites.split(",") if s.strip()]
+            if not set_sites(conn, args.keyword, sites):
+                print(f"'{args.keyword}'를 찾을 수 없음", file=sys.stderr)
+                sys.exit(1)
+            print(f"사이트 설정됨: {args.keyword} (sites={sites or '전체'})")
     finally:
         conn.close()
 
