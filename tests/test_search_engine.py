@@ -138,17 +138,33 @@ def test_terms_for_domain_uses_english_terms_for_english_sites():
     assert search_engine._terms_for_domain(kw, "techcrunch.com") == ["AI education", "edtech"]
 
 
-def test_terms_for_domain_falls_back_to_keyword_when_empty():
-    """아직 언어별 검색어를 등록 안 한 고정 키워드는 keyword 자체로 폴백한다."""
-    kw = {"keyword": "교육", "search_terms_ko": [], "search_terms_en": []}
-    assert search_engine._terms_for_domain(kw, "aitimes.com") == ["교육"]
-    assert search_engine._terms_for_domain(kw, "techcrunch.com") == ["교육"]
+def test_terms_for_domain_falls_back_to_broad_queries_when_empty():
+    """아직 언어별 검색어를 등록 안 한 고정 키워드는 넓은 질의(BROAD_QUERIES)로
+    폴백한다(2026-08-25) — keyword 문자열 자체로 폴백하던 예전 동작은
+    "콘텐츠팀"처럼 검색 의도와 무관한 팀 이름이 그대로 질의로 나가는 문제가
+    실사용 중 확인돼 바뀌었다."""
+    kw = {"keyword": "콘텐츠팀", "search_terms_ko": [], "search_terms_en": []}
+    assert search_engine._terms_for_domain(kw, "aitimes.com") == search_engine.BROAD_QUERIES_KO
+    assert search_engine._terms_for_domain(kw, "techcrunch.com") == search_engine.BROAD_QUERIES_EN
 
 
 def test_terms_for_domain_falls_back_when_keys_missing():
     """search_terms_ko/en 키 자체가 없는 dict(구버전 호출부 호환)도 안전해야 한다."""
     kw = {"keyword": "교육"}
-    assert search_engine._terms_for_domain(kw, "aitimes.com") == ["교육"]
+    assert search_engine._terms_for_domain(kw, "aitimes.com") == search_engine.BROAD_QUERIES_KO
+
+
+def _patch_both_fetch_paths(monkeypatch, fake_news_topic, fake_no_news_topic=None):
+    """collect_for_keyword(collect_pool_for_site와 같은 이유, 2026-08-25)는
+    국내 도메인이면 _fetch_site_results_no_news_topic으로, 그 외엔
+    _fetch_site_results로 나뉘어 호출한다 — 테스트가 한쪽만 갈아끼우면
+    나머지 경로가 실제 네트워크를 타 버린다. 기본은 두 경로가 같은 동작을
+    하게(뒤의 start/end 인자만 무시) 묶어준다."""
+    monkeypatch.setattr(search_engine, "_fetch_site_results", fake_news_topic)
+    monkeypatch.setattr(
+        search_engine, "_fetch_site_results_no_news_topic",
+        fake_no_news_topic or (lambda term, domain: fake_news_topic(term, domain, _START, _END)),
+    )
 
 
 def test_collect_for_keyword_queries_once_per_term_per_site(monkeypatch):
@@ -159,7 +175,9 @@ def test_collect_for_keyword_queries_once_per_term_per_site(monkeypatch):
         calls.append((domain, term))
         return []
 
-    monkeypatch.setattr(search_engine, "_fetch_site_results", fake_fetch)
+    _patch_both_fetch_paths(
+        monkeypatch, fake_fetch, lambda term, domain: fake_fetch(term, domain, _START, _END),
+    )
 
     kw = {
         "id": 1, "keyword": "교육",
@@ -180,11 +198,11 @@ def test_collect_for_keyword_stores_actual_term_as_query(monkeypatch):
     """search_results.query엔 카테고리 이름("교육")이 아니라 실제로 검색에
     쓴 구체적인 검색어("에듀테크")가 남아야 한다 — 나중에 어느 검색어가
     이 기사를 찾아왔는지 추적할 수 있게."""
-    monkeypatch.setattr(
-        search_engine, "_fetch_site_results",
-        lambda term, domain, start_date, end_date: (
-            [_item("https://www.aitimes.com/news/x.html")] if domain == "aitimes.com" else []
-        ),
+    def fake_fetch(term, domain):
+        return [_item("https://www.aitimes.com/news/x.html")] if domain == "aitimes.com" else []
+
+    _patch_both_fetch_paths(
+        monkeypatch, lambda term, domain, s, e: fake_fetch(term, domain), fake_fetch,
     )
 
     conn = _FakeConn()
@@ -207,28 +225,60 @@ def test_collect_for_keyword_queries_each_site_domain_separately(monkeypatch):
         assert (start_date, end_date) == (_START, _END)
         return []
 
-    monkeypatch.setattr(search_engine, "_fetch_site_results", fake_fetch)
+    _patch_both_fetch_paths(
+        monkeypatch, fake_fetch, lambda keyword, domain: calls.append(domain) or [],
+    )
 
     search_engine.collect_for_keyword(
-        _FakeConn(), run_id=1, fixed_keyword={"id": 1, "keyword": "에이전트 도입"},
+        _FakeConn(), run_id=1,
+        fixed_keyword={
+            "id": 1, "keyword": "에이전트 도입",
+            "search_terms_ko": ["에이전트"], "search_terms_en": ["agent"],
+        },
         start_date=_START, end_date=_END,
     )
 
     assert calls == search_engine.SITE_DOMAINS
 
 
+def test_collect_for_keyword_only_uses_the_given_site_domains(monkeypatch):
+    """팀이 화면에서 사이트를 고르면(fixed_keyword["site_domains"]) 그 사이트만
+    돌아야 한다 — 안 그러면 "우리 팀은 이 사이트만" 설정이 무의미해진다."""
+    calls = []
+    _patch_both_fetch_paths(
+        monkeypatch,
+        lambda keyword, domain, s, e: calls.append(domain) or [],
+        lambda keyword, domain: calls.append(domain) or [],
+    )
+
+    search_engine.collect_for_keyword(
+        _FakeConn(), run_id=1,
+        fixed_keyword={
+            "id": 1, "keyword": "콘텐츠팀", "site_domains": ["aitimes.com", "techcrunch.com"],
+            "search_terms_ko": ["에듀테크"], "search_terms_en": ["edtech"],
+        },
+        start_date=_START, end_date=_END,
+    )
+
+    assert sorted(calls) == ["aitimes.com", "techcrunch.com"]
+
+
 def test_collect_for_keyword_stores_only_allowed_urls(monkeypatch):
     """Tavily가 도메인은 맞혀도 화이트리스트 경로 밖의 URL(예: techmeme.com/river)을
     돌려주면 저장 단계에서 다시 걸러져야 한다(이중 강제)."""
-    def fake_fetch(keyword, domain, start_date, end_date):
+    def fake_fetch(keyword, domain, *_rest):
         if domain == "techmeme.com":
             return [_item("https://www.techmeme.com/260813/p1"), _item("https://www.techmeme.com/river")]
         return []
 
-    monkeypatch.setattr(search_engine, "_fetch_site_results", fake_fetch)
+    _patch_both_fetch_paths(
+        monkeypatch, lambda k, d, s, e: fake_fetch(k, d), lambda k, d: fake_fetch(k, d),
+    )
 
     result = search_engine.collect_for_keyword(
-        _FakeConn(), run_id=1, fixed_keyword={"id": 1, "keyword": "교육"}, start_date=_START, end_date=_END,
+        _FakeConn(), run_id=1,
+        fixed_keyword={"id": 1, "keyword": "교육", "search_terms_ko": ["교육"], "search_terms_en": ["education"]},
+        start_date=_START, end_date=_END,
     )
 
     assert result["fetched"] == 2  # Tavily가 준 원본 개수
@@ -237,28 +287,35 @@ def test_collect_for_keyword_stores_only_allowed_urls(monkeypatch):
 
 
 def test_collect_for_keyword_dedups_same_url_across_sites(monkeypatch):
-    def fake_fetch(keyword, domain, start_date, end_date):
+    def fake_fetch(keyword, domain, *_rest):
         return [_item("https://techcrunch.com/2026/08/13/story/")]
 
-    monkeypatch.setattr(search_engine, "_fetch_site_results", fake_fetch)
+    _patch_both_fetch_paths(
+        monkeypatch, lambda k, d, s, e: fake_fetch(k, d), lambda k, d: fake_fetch(k, d),
+    )
 
     result = search_engine.collect_for_keyword(
         _FakeConn(), run_id=1, fixed_keyword={"id": 1, "keyword": "교육"}, start_date=_START, end_date=_END,
     )
 
-    # 6개 사이트 전부 같은 URL을 돌려줘도(스텁이라 실제로는 안 그러겠지만) 1건만 저장돼야 함
+    # 사이트 전부 같은 URL을 돌려줘도(스텁이라 실제로는 안 그러겠지만) 1건만 저장돼야 함
     assert result["inserted"] == 1
 
 
 def test_collect_for_keyword_returns_error_on_http_failure(monkeypatch):
-    """한 사이트 호출이 실패해도 예외를 던지지 않고 error 필드로 보고해야 한다(파이프라인 격리)."""
+    """한 사이트 호출이 실패해도 예외를 던지지 않고 error 필드로 보고해야 한다(파이프라인 격리).
+
+    영어 사이트(topic=news 경로)만으로도 이 동작을 검증할 수 있으므로,
+    국내 사이트를 배제해 영어 사이트만 쓰는 fixed_keyword로 좁힌다."""
     def fake_fetch(keyword, domain, start_date, end_date):
         raise httpx.HTTPError("boom")
 
     monkeypatch.setattr(search_engine, "_fetch_site_results", fake_fetch)
 
     result = search_engine.collect_for_keyword(
-        _FakeConn(), run_id=1, fixed_keyword={"id": 1, "keyword": "교육"}, start_date=_START, end_date=_END,
+        _FakeConn(), run_id=1,
+        fixed_keyword={"id": 1, "keyword": "교육", "site_domains": ["techcrunch.com"]},
+        start_date=_START, end_date=_END,
     )
 
     assert result["error"] == "boom"
@@ -310,26 +367,47 @@ def test_collect_all_reports_missing_credentials(monkeypatch):
     assert "TAVILY_API_KEY" in results[0]["error"]
 
 
-def test_collect_all_collects_per_site_not_per_keyword(monkeypatch):
-    """006 — 수집은 시장과 무관한 공용 풀이다. 사이트마다 한 번씩 돌고,
-    이 run의 달력 주(get_run_period)를 그대로 넘긴다. 고정 키워드가 늘어도
-    호출 수가 늘지 않는 게 핵심(크레딧이 시장 수와 무관해진다)."""
+def test_collect_all_collects_per_site_using_the_deployments_team(monkeypatch):
+    """2026-08-25 재설계 — 한 배포 = 팀 하나. 활성 고정 키워드 중 첫 번째를
+    "이 배포의 팀"으로 삼아 그 팀을 collect_pool_for_site에 그대로 넘긴다.
+    site_domains를 안 정한 팀은 전체 화이트리스트를 돈다(하위 호환)."""
     monkeypatch.setattr(search_engine.settings, "tavily_api_key", "key")
     monkeypatch.setattr(search_engine, "get_connection", lambda: _FakeConn())
-    monkeypatch.setattr(search_engine, "get_active_fixed_keywords", lambda conn: [
-        {"id": 1, "keyword": "에이전트 도입"}, {"id": 2, "keyword": "교육"},
-    ])
+    team = {"id": 1, "keyword": "콘텐츠팀"}
+    monkeypatch.setattr(search_engine, "get_active_fixed_keywords", lambda conn: [team])
     monkeypatch.setattr(search_engine, "get_run_period", lambda conn, run_id: (_START, _END))
 
     calls = []
     monkeypatch.setattr(
         search_engine, "collect_pool_for_site",
-        lambda conn, run_id, domain, start_date, end_date: calls.append((domain, start_date, end_date)),
+        lambda conn, run_id, domain, start_date, end_date, fixed_keyword=None:
+            calls.append((domain, start_date, end_date, fixed_keyword)),
     )
 
     search_engine.collect_all(run_id=1)
 
-    assert calls == [(d, _START, _END) for d in search_engine.SITE_DOMAINS]
+    assert calls == [(d, _START, _END, team) for d in search_engine.SITE_DOMAINS]
+
+
+def test_collect_all_only_visits_the_teams_chosen_sites(monkeypatch):
+    """팀이 site_domains를 골랐으면 그 사이트만 돌아야 한다 — 전체 화이트
+    리스트를 도는 예전 동작(006)이 그대로 남아있으면 "우리 팀은 이 사이트만"
+    설정이 무의미해진다."""
+    monkeypatch.setattr(search_engine.settings, "tavily_api_key", "key")
+    monkeypatch.setattr(search_engine, "get_connection", lambda: _FakeConn())
+    team = {"id": 1, "keyword": "콘텐츠팀", "site_domains": ["aitimes.com", "techcrunch.com"]}
+    monkeypatch.setattr(search_engine, "get_active_fixed_keywords", lambda conn: [team])
+    monkeypatch.setattr(search_engine, "get_run_period", lambda conn, run_id: (_START, _END))
+
+    calls = []
+    monkeypatch.setattr(
+        search_engine, "collect_pool_for_site",
+        lambda conn, run_id, domain, start_date, end_date, fixed_keyword=None: calls.append(domain),
+    )
+
+    search_engine.collect_all(run_id=1)
+
+    assert sorted(calls) == ["aitimes.com", "techcrunch.com"]
 
 
 def test_collect_all_still_needs_an_active_market(monkeypatch):

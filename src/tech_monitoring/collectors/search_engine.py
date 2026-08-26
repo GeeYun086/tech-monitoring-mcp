@@ -499,8 +499,9 @@ def _insert_pool_article(conn, *, run_id: int, domain: str, query: str, item: di
 
 def collect_pool_for_site(
     conn, run_id: int, domain: str, start_date: date, end_date: date,
+    fixed_keyword: dict | None = None,
 ) -> dict:
-    """사이트 하나에 넓은 질의를 각각 던져 공용 풀에 쌓는다.
+    """사이트 하나에 질의를 각각 던져 공용 풀에 쌓는다.
 
     한 사이트가 죽어도 다른 사이트는 계속 진행한다 — 실패는 error에 담아
     정상 리턴하고, 파이프라인이 pipeline_report.stage_errors로 실패를 드러낸다
@@ -513,12 +514,19 @@ def collect_pool_for_site(
     참고). 그래서 `KOREAN_DOMAINS`는 `start_date`/`end_date` 없이 일반
     검색으로 돌리고, 그 결과는 발행일 없이 저장된다(_insert_pool_article
     참고) — start_date/end_date 인자를 그대로 받아두는 이유는 해외 매체
-    호출에 여전히 쓰이기 때문이다."""
+    호출에 여전히 쓰이기 때문이다.
+
+    **fixed_keyword(2026-08-25, 팀별 배포 재설계)**: 이 배포의 팀(collect_all
+    이 넘겨준다)이 있으면 그 팀의 언어별 검색어(`_terms_for_domain`)로
+    질의하고, 없으면(테스트 등 하위 호환) 기존처럼 넓은 질의
+    (`broad_queries_for_domain`)를 쓴다. 팀이 검색어를 아직 안 정했어도
+    `_terms_for_domain` 자체가 넓은 질의로 폴백하므로 항상 안전하다."""
     name = SITE_NAMES.get(domain, domain)
     fetched = inserted = 0
     use_news_topic = domain not in KOREAN_DOMAINS
+    queries = _terms_for_domain(fixed_keyword, domain) if fixed_keyword else broad_queries_for_domain(domain)
 
-    for query in broad_queries_for_domain(domain):
+    for query in queries:
         try:
             if use_news_topic:
                 items = _fetch_site_results(query, domain, start_date, end_date)
@@ -540,32 +548,51 @@ def collect_pool_for_site(
 
 def _terms_for_domain(fixed_keyword: dict, domain: str) -> list[str]:
     """도메인의 언어에 맞는 검색어 목록. 둘 다 비어있으면(아직 등록 안 함)
-    keyword 자체로 폴백해 기존 동작을 유지한다."""
+    **넓은 질의(BROAD_QUERIES)로 폴백한다**(2026-08-25 변경 — 예전엔
+    keyword 문자열 자체로 폴백했는데, "콘텐츠팀"처럼 팀 이름이 검색 의도와
+    무관한 문자열이면 그대로 질의로 나가 무의미한 결과만 쌓이는 걸 실사용
+    중 확인했다). 팀 이름은 표시용일 뿐 검색어가 아니라는 원칙을 여기서도
+    지킨다."""
     if domain in KOREAN_DOMAINS:
         terms = fixed_keyword.get("search_terms_ko") or []
     else:
         terms = fixed_keyword.get("search_terms_en") or []
-    return terms or [fixed_keyword["keyword"]]
+    return terms or broad_queries_for_domain(domain)
 
 
 def collect_for_keyword(
     conn, run_id: int, fixed_keyword: dict, start_date: date, end_date: date,
 ) -> dict:
-    """고정 키워드 하나에 대해 (화이트리스트 사이트 × 그 언어의 검색어) 조합마다
-    개별 호출 후 search_results에 저장. start_date/end_date는 이 run의 달력 주
-    (db/weekly_run.get_run_period)다.
+    """고정 키워드 하나에 대해 (사이트 × 그 언어의 검색어) 조합마다 개별 호출 후
+    search_results에 저장. start_date/end_date는 이 run의 달력 주(db/weekly_run.
+    get_run_period)다.
 
-    **파이프라인은 이 경로를 쓰지 않는다**(2026-08-19부터 collect_pool). 시장별
-    검색어로 정밀도를 보강하고 싶을 때를 위한 선택적 경로로 남겨둔다 — 실측상
-    이 방식만으로는 시장당 3~5건이라 라벨링·학습 물량이 안 나온다(006 헤더).
+    **파이프라인은 이 경로를 쓰지 않는다**(2026-08-19부터 collect_pool). 대신
+    2026-08-25부터 **팀별 자체 수집**(app/streamlit_app.py "새 팀 만들기") 이
+    이 경로를 쓴다 — 시장별 검색어로 정밀도를 보강하고 싶을 때를 위한 경로였는데,
+    실측상 넓은 질의(BROAD_QUERIES)만으로는 시장당 3~5건이라 라벨링·학습 물량이
+    안 나온다는 한계(006 헤더)가, 오히려 "이 팀만 보고 싶은 좁은 주제"에는 장점이
+    된다 — 넓게 긁지 않고 그 팀 검색어에 맞는 것만 모은다.
+
+    **사이트 목록도 팀마다 고를 수 있다**: `fixed_keyword.get("site_domains")`가
+    있으면 그 사이트들만 돈다(팀이 화면에서 고른 부분집합). 없으면(기존 호출부
+    호환) 전체 화이트리스트(SITE_DOMAINS)를 그대로 쓴다.
+
+    **국내 사이트는 topic="news" 경로를 안 쓴다** — collect_pool_for_site와
+    같은 이유(실측 2026-08-25: topic=news가 국내 매체 대부분에서 항상 0건,
+    `_fetch_site_results_no_news_topic` 헤더 참고)로 여기서도 똑같이 우회한다.
     """
     keyword = fixed_keyword["keyword"]
+    domains = fixed_keyword.get("site_domains") or SITE_DOMAINS
     fetched = inserted = 0
 
-    for domain in SITE_DOMAINS:
+    for domain in domains:
         for term in _terms_for_domain(fixed_keyword, domain):
             try:
-                items = _fetch_site_results(term, domain, start_date, end_date)
+                if domain in KOREAN_DOMAINS:
+                    items = _fetch_site_results_no_news_topic(term, domain)
+                else:
+                    items = _fetch_site_results(term, domain, start_date, end_date)
             except httpx.HTTPError as exc:
                 return {"fixed_keyword": keyword, "fetched": fetched, "inserted": inserted, "error": str(exc)}
 
@@ -584,13 +611,18 @@ def collect_for_keyword(
 
 
 def collect_all(run_id: int, weeks: list[tuple[date, date]] | None = None) -> list[dict]:
-    """공용 기사 풀을 만든다 — 화이트리스트 사이트마다 넓은 질의로 수집
-    (006 헤더 참고).
+    """공용 기사 풀을 만든다 — 이 배포의 팀(활성 고정 키워드) 검색어·사이트로
+    수집(2026-08-25 재설계, 006 헤더의 예전 설계에서 전환).
 
-    고정 키워드를 보지 않는다: 수집은 시장과 무관하고, 시장별 선별은 나중에
-    분류기가 한다. 그래서 시장을 추가해도 재수집이 필요 없고 크레딧이 시장
-    수와 무관하다. 다만 활성 키워드가 하나도 없으면 수집해도 볼 화면이 없어
-    그대로 알린다(라벨링·판단이 전부 시장 단위라서).
+    **한 배포 = 팀 하나다**: 활성 고정 키워드 중 첫 번째를 "이 배포의 팀"으로
+    삼아, 그 팀이 설정한 언어별 검색어(비어있으면 넓은 질의로 폴백,
+    `_terms_for_domain` 참고)와 사이트 목록(비어있으면 전체 화이트리스트로
+    폴백)으로만 수집한다. 예전엔(006) 고정 키워드를 아예 안 보고 항상 전체
+    화이트리스트에 넓은 질의("AI")만 던졌는데, 팀마다 레포를 통째로 포크해
+    따로 배포하는 모델로 바뀌면서(README "다른 팀이 독립적으로 배포하기")
+    "이 배포가 어느 팀인지" 자체를 고정 키워드로 표현하는 게 자연스러워졌다.
+    활성 키워드가 하나도 없으면(배포 직후 팀 설정 전) 수집해도 볼 화면이
+    없어 그대로 알린다.
 
     weeks를 주면 그 달력 주들을 **주차별로 따로** 호출한다(최초 3주치 수집).
     한 번에 3주 범위로 요청하지 않는 이유: Tavily는 페이지네이션이 없고 한
@@ -602,14 +634,21 @@ def collect_all(run_id: int, weeks: list[tuple[date, date]] | None = None) -> li
 
     conn = get_connection()
     try:
-        if not get_active_fixed_keywords(conn):
-            return [{"source": None, "fetched": 0, "inserted": 0, "error": "fixed_keywords에 활성 키워드 없음"}]
+        active = get_active_fixed_keywords(conn)
+        if not active:
+            return [{
+                "source": None, "fetched": 0, "inserted": 0,
+                "error": "fixed_keywords에 활성 키워드 없음 — 배포 시 팀 설정을 먼저 하세요"
+                         "(scripts/manage_fixed_keywords.py add)",
+            }]
+        team = active[0]
+        domains = team.get("site_domains") or SITE_DOMAINS
         if weeks is None:
             weeks = [get_run_period(conn, run_id)]
         return [
-            collect_pool_for_site(conn, run_id, domain, start_date, end_date)
+            collect_pool_for_site(conn, run_id, domain, start_date, end_date, fixed_keyword=team)
             for start_date, end_date in weeks
-            for domain in SITE_DOMAINS
+            for domain in domains
         ]
     finally:
         conn.close()

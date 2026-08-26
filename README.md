@@ -1,6 +1,10 @@
 # tech-monitoring-mcp
 
-goormEDU 전략기획팀 **AX 시장 모니터링**.
+팀이 정한 검색어·사이트로 매주 기사를 모으고, 사람이 매긴 👍/👎로 학습한
+분류기가 순위를 매겨주는 **기사 모니터링** 도구. 원래 goormEDU 전략기획팀의
+AX(AI 전환) 시장 모니터링용으로 시작했지만, 팀마다 검색어·사이트·이름을
+따로 설정해 이 저장소를 포크해 쓸 수 있게 일반화됐다(2026-08-25, "다른 팀이
+독립적으로 배포하기" 참고).
 
 ## v2 아키텍처 (2026-08-13 피벗)
 
@@ -106,44 +110,29 @@ pg_dump -t article_labels --data-only <옛DB> | psql <공용Supabase>
 
 ## Streamlit Cloud 배포 — 담당자와 함께 라벨링하기
 
-라벨을 빨리 모으려면 담당자에게 링크만 주고 브라우저에서 라벨링하게 하는 게
+담당자에게 링크만 주고 브라우저에서 기사마다 👍/👎를 누르게 하는 게
 가장 빠르다. **DB(Supabase)가 이미 클라우드에 있으므로 누른 라벨은 곧바로
 같은 DB에 쌓인다** — 담당자 쪽에 설치할 것이 없다.
 
-### 앱 하나를 함께 쓴다 — 팀 공용 라벨 풀 (2026-08-19 결정)
+### 좋아요는 익명이다 — LABELED_BY 설정이 필요 없다(2026-08-24 이후)
 
-앱 하나를 배포하고 링크를 공유한다. secrets의 `LABELED_BY`를 `team` 같은
-**공용 값 하나**로 두면 누가 누르든 같은 라벨 풀에 쌓인다 — 지금은 통합 모델
-(전체 라벨로 하나를 학습)이라 이 편이 일관된다. 코드 수정도 필요 없다.
+예전엔(2026-08-19) 별도 "라벨링" 화면이 있었고 `LABELED_BY` secret으로
+"누구 이름으로 저장할지"를 정했다. **지금은 기사 목록에 인라인 👍/👎만
+있고, 누를 때마다 무작위 토큰이 발급된다**(labeling.fetch_like_counts
+헤더 참고) — 그래서 `LABELED_BY`를 따로 안 정해도, 여러 사람이 같은
+링크로 눌러도 각자의 클릭이 그대로 쌓인다. 개수만 세고 "누가 눌렀는지"는
+애초에 안 남기는 설계다.
 
 배포 설정:
 - Main file path: `app/streamlit_app.py`
 - Python: 3.12 (`pyproject.toml`의 `requires-python`)
-- Secrets: `DATABASE_URL`(필수), `LABELED_BY = "team"`. `TAVILY_API_KEY`는
-  **넣지 않는 걸 권장** — 대시보드의 "직접 검색"이 실시간 API를 호출해
-  크레딧을 쓴다. 없으면 그 칸만 안내 문구가 뜨고 라벨링은 정상 동작한다.
+- Secrets: `DATABASE_URL`·`TAVILY_API_KEY` 둘 다 필요하다. `TAVILY_API_KEY`는
+  평소 화면(키워드 검색은 이미 모아둔 기사 안에서 TF-IDF로 찾아 Tavily를
+  안 부른다)엔 안 쓰이지만, **첫 실행 설정 화면("처음 오셨네요")이 팀을
+  등록하는 그 자리에서 곧바로 첫 수집을 돌리기 때문에** 배포 환경에도
+  있어야 한다("고정 키워드 설정" 절 참고).
 - 무료 앱은 링크를 아는 누구나 들어오고 DB에 쓸 수 있다. 비공개(이메일 초대)
   설정을 쓰거나 링크를 사내에만 공유할 것.
-
-**이미 라벨한 기사를 서로 덮어쓰지는 않는다.** `fetch_unlabeled_candidates`가
-"이 라벨러가 아직 안 본 것"만 후보로 올리는데, 공용 값을 쓰면 두 사람이 같은
-라벨러이므로 한쪽이 누른 기사는 다른 쪽 화면에서도 곧바로 사라진다(실측
-2026-08-19: 기사 152건 중 60건 라벨 → 남은 후보 92건). 누를 기회 자체가 없다.
-
-남는 노출은 두 가지뿐이고 둘 다 실무에서 문제가 되지 않는다:
-- "라벨 검토 및 수정" 패널에서는 남이 매긴 것도 보이고 고칠 수 있다 — 공용
-  판단 풀이라는 의도에 오히려 맞다(오클릭을 서로 정정해줄 수 있다).
-- 두 사람이 같은 기사를 동시에 띄워둔 채 각각 누르면 나중 것이 이긴다.
-
-**진짜로 감수하는 것은 하나다 — 누가 눌렀는지 기록이 남지 않는다.** 전부 같은
-`labeled_by`로 저장되므로 **이 방식으로 쌓은 라벨은 나중에 사람별로 나눌 수
-없다**(개인 모델로 바꾸더라도 그때부터 쌓는 라벨만 분리된다). 지금은 통합
-모델이라 무관하고, 라벨을 빨리 모으는 게 우선이라 이 손실을 받아들인 것이다.
-
-나중에 사람별로 나누려면 화면에 "지금 라벨링하는 사람" 선택을 붙이고
-(`labeling`의 모든 함수가 이미 `labeled_by` 인자를 받는다) 앱마다 다른
-`LABELED_BY`를 주는 대신 세션에서 정하게 하면 된다. 앱을 사람 수만큼 배포하는
-방법도 있지만 쓰는 사람이 늘 때마다 앱을 만들어야 해서 운영 방식으로 맞지 않는다.
 
 ### torch를 넣지 않는다
 
@@ -272,12 +261,78 @@ Claude Desktop 등 다른 클라이언트는 아래처럼 등록한다(`DATABASE
 
 ## 고정 키워드(모니터링 대상 시장) 설정
 
-Streamlit UI가 생기기 전까지는 CLI로 관리한다.
+**한 배포 = 팀 하나다(2026-08-25 재설계).** 팀 이름·검색어·사이트는
+**화면의 첫 실행 설정에서** 정한다 — `fixed_keywords`가 비어있으면
+`app/streamlit_app.py`가 CLI 없이 설정 화면을 바로 보여주고, 제출하면
+그 자리에서 첫 수집까지 끝낸다(`_render_first_run_setup` 참고). 한 번
+설정하고 나면 이 화면은 다시 안 뜨고, 그 뒤로는 매주 이 설정 그대로
+자동 수집된다. 다른 팀은 이 저장소를 통째로 포크해 따로 배포한다(아래
+"다른 팀이 독립적으로 배포하기" 참고) — 화면에서 팀을 더 추가하는
+기능은 없다.
+
+CLI(`scripts/manage_fixed_keywords.py`)는 **이미 설정된 팀을 나중에
+조정할 때**(이름 변경·검색어/사이트 재설정·비활성화)만 쓴다:
 
 ```bash
-./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py add "AX 시장" --order 1
 ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py list
+./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py set-terms "<팀 이름>" --ko "AI 교육,에듀테크" --en "AI education,edtech"
+./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py set-sites "<팀 이름>" --sites "aitimes.com,edu.donga.com"
 ```
+
+**주의**: 사이트는 화면에서도 CLI에서도 **이미 검증된 화이트리스트
+중에서만** 고를 수 있다 — 완전히 새로운 사이트는 URL이 진짜 기사 페이지인지
+사람이 한 번은 확인해야 해서(아래 "새 수집 사이트 추가하기" 참고)
+자동화돼 있지 않다.
+
+## 다른 팀이 독립적으로 배포하기
+
+**완전히 다른 조직/예산으로 쓰고 싶은 팀**은 이 저장소를 포크해서 자기
+몫의 Supabase·Tavily 무료 티어로 따로 배포하면 된다 — 팀마다 무료 한도를
+새로 받는 셈이라 이쪽이 더 낫다. 그 포크 하나 = 그 팀 전용 배포다.
+
+**Claude Code한테 통째로 맡길 수는 없다** — 계정 생성(Supabase·Tavily)과
+발급받은 키를 GitHub/Streamlit Cloud Secrets에 입력하는 건 AI 에이전트가
+대신 할 수 없는 영역이다(자격증명 관련 행동 정책). 아래 1~3번(계정 만들고
+키 발급)만 사람이 직접 하고, 그다음(포크한 코드 손보기·마이그레이션)은
+Claude Code에 시켜도 된다.
+
+1. **저장소 포크** — GitHub에서 Fork.
+2. **자기 Supabase 프로젝트 생성**(무료 티어) → `DATABASE_URL` 확보.
+3. **자기 Tavily API 키 발급**([tavily.com](https://tavily.com), 무료 티어,
+   카드 등록 불필요).
+4. 포크한 저장소를 로컬에 클론해 `.env`에 위 두 값을 넣고 마이그레이션 적용:
+   ```bash
+   ./.venv/Scripts/python.exe -m tech_monitoring.db.migrate
+   ```
+5. **GitHub Actions 활성화** — 포크 저장소는 Actions가 기본적으로 꺼져 있다
+   (GitHub의 보안 기본값). 저장소의 Actions 탭에서 켠 뒤, Settings →
+   Secrets and variables → Actions에 `DATABASE_URL`·`TAVILY_API_KEY`를
+   등록해야 `weekly-collect.yml`이 매주 월요일 자동으로 돈다.
+6. **Streamlit Cloud에 자기 앱으로 배포** — 포크 저장소를 연결하고
+   `DATABASE_URL`·`TAVILY_API_KEY`를 Secrets에 등록한다("Streamlit Cloud
+   배포" 절 참고 — 첫 실행 설정 화면이 그 자리에서 수집을 돌리므로
+   `TAVILY_API_KEY`가 배포 환경에도 있어야 한다).
+7. **링크를 열어 팀 설정** — 배포된 링크를 열면 "처음 오셨네요" 설정
+   화면이 뜬다. 팀 이름·검색어·사이트를 입력하고 "시작하기"를 누르면
+   등록과 동시에 첫 수집이 돈다(사이트·검색어 수에 따라 몇 분 걸릴 수
+   있음). 끝나면 이 링크를 팀원에게 공유한다 — 접속한 사람 전부 같은
+   팀의 기사·좋아요를 본다.
+
+### 새 수집 사이트 추가하기
+
+`set-sites`는 기존 화이트리스트 안에서만 고를 수 있다. 완전히 새로운
+사이트를 추가하려면(코드 수정 필요):
+
+1. 그 사이트에서 실제 기사 URL 몇 개를 모아 공통 패턴을 확인한다(예:
+   `articleView.html?idxno=12345`).
+2. `collectors/search_engine.py`의 `SITE_INCLUDE_PATTERNS`/
+   `SITE_EXCLUDE_PATTERNS`/`SITE_DOMAINS`/`KOREAN_DOMAINS`/`SITE_NAMES`에
+   추가한다(기존 17곳 항목을 참고).
+3. `tests/test_search_engine.py`에 그 사이트의 실제 URL로 통과/차단
+   테스트를 추가해 패턴을 검증한다.
+
+패턴 검증 없이 사이트를 추가하면 홈페이지·광고·목록 페이지가 기사인 것처럼
+섞여 들어온다 — 그래서 이 단계만큼은 자동화하지 않았다.
 
 ## 파이프라인 실행
 

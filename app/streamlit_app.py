@@ -1,18 +1,27 @@
-"""AX 시장 모니터링 Streamlit 대시보드.
+"""기사 모니터링 Streamlit 대시보드(2026-08-25부로 "AX 시장 모니터링"에서
+개명 — 특정 팀 전용 이름이 아니라 어느 팀이 포크해 써도 맞는 이름으로).
 
 계산(랭킹·필터링)은 전부 tech_monitoring.dashboard_queries가 한다 — 여기는
 레이아웃만 담당한다(v1 ax-dashboard 스킬에서 이어받은 원칙, SKILL.md는
 삭제됐지만 "숫자 계산은 스크립트가, 화면은 레이아웃만" 이유는 그대로 유효).
 
+**한 배포 = 팀 하나(2026-08-25 재설계)**: 화면에서 팀을 추가하던 "➕ 새 팀"
+탭은 없앴다. 대신 배포하기 **전에** `scripts/manage_fixed_keywords.py`로
+팀 이름·검색어·사이트를 미리 정해두면(README "다른 팀이 독립적으로
+배포하기" 참고), 그 설정 그대로 매주 자동 수집(pipeline_v2 →
+collectors.search_engine.collect_all)이 돌고 이 화면은 그 결과만 보여준다.
+다른 팀은 이 레포·DB·배포 링크를 통째로 새로 만들어 쓴다 — 한 링크에
+접속한 사람들은 전부 같은 팀의 기사만 본다.
+
 화면 구성(2026-08-24 대개편 — 마켓 3개 분할 제거):
-    1. "기사" 탭(기본 화면) — 이번 주 공용 기사 풀 전체를 보여준다(006,
-       top20 등으로 안 자르는 원칙은 그대로, 2026-08-13 담당자 확인).
+    1. "<팀 이름>" 탭(기본 화면, fixed_keywords.keyword가 그대로 탭 이름이
+       된다) — 이번 주 공용 기사 풀 전체를 보여준다(006, top20 등으로 안
+       자르는 원칙은 그대로, 2026-08-13 담당자 확인).
        **마켓(고정 키워드) 3개로 나눠 보던 걸 없앴다** — 수집 자체가 애초에
        시장과 무관한 공용 풀이라(collectors/search_engine.py의 "공용 기사
-       풀" 방식) 3개로 쪼개 보는 게 의미 없다는 담당자 판단. DB의
-       fixed_keywords는 스키마를 안 건드리려고 1개만 active로 남겨뒀다
-       (scripts/manage_fixed_keywords.py로 조정 가능하지만, 지금 설계는
-       "여러 마켓"을 다시 켜는 걸 상정하지 않는다).
+       풀" 방식) 3개로 쪼개 보는 게 의미 없다는 담당자 판단. 활성
+       fixed_keywords는 이제 딱 1개만 두는 게 이 배포의 팀을 뜻한다(위
+       "한 배포 = 팀 하나" 참고).
        - 정렬: **국내 매체 우선**(2026-08-24 담당자 피드백 — 해외 기사에
          묻혀 국내 기사가 잘 안 보인다는 의견. dashboard_queries.
          _sort_domestic_first, 국내/해외 판정은 collectors/search_engine.py
@@ -67,7 +76,7 @@ from tech_monitoring.db.connection import get_connection
 from tech_monitoring.db.weekly_run import get_run_period
 from tech_monitoring.utils.url_normalize import normalize_url
 
-st.set_page_config(page_title="AX 시장 모니터링", layout="wide")
+st.set_page_config(page_title="기사 모니터링", layout="wide")
 
 _STATUS_LABELS = {"completed": "완료", "running": "진행 중", "failed": "실패"}
 
@@ -451,26 +460,34 @@ def _render_performance_tab(conn) -> None:
     )
 
 
-def _search_by_keyword(articles: list[dict], query: str) -> list[dict]:
-    """제목·요약에 검색어가 그대로 들어있는 기사만 찾는다(2026-08-25,
-    임베딩 방식에서 되돌림).
+def _search_by_keyword(
+    articles: list[dict], query: str, *, top_k: int = 50, min_similarity: float = 0.05,
+) -> list[dict]:
+    """문자 n-gram TF-IDF 코사인 유사도로 기사를 찾는다(2026-08-25, 두 번째
+    되돌림 — 단순 포함 검색 다음 단계).
 
-    **원래는(2026-08-24) 문장 임베딩 코사인 유사도 방식이었다** — "생성형
-    AI"를 검색해도 "LLM" 같은 다른 표현까지 걸리게 하려는 목적이었다.
-    그런데 그 방식은 sentence-transformers(선택 설치, pyproject의
-    [embedding] extra)가 있어야 도는데, **배포 환경(Streamlit Cloud)엔
-    일부러 안 깔려 있다**(torch 527MB+모델 458MB가 무료 티어엔 너무 커서 —
-    requirements.txt 헤더 참고). 그 결과 배포된 화면에서는 검색을 누를
-    때마다 "임베딩 라이브러리가 필요하다"는 안내만 뜨고 실제로는 전혀
-    작동하지 않았다 — 담당자 확인 후 "완전 일치가 안 되더라도 배포 환경에서
-    실제로 동작하는 쪽"으로 되돌리기로 했다. 대소문자 구분 없이 부분 문자열
-    포함 여부만 본다 — 별도 라이브러리가 필요 없어 배포 환경에서도 항상
-    동작한다."""
-    needle = query.lower()
-    return [
-        a for a in articles
-        if needle in (a["title"] or "").lower() or needle in (a.get("snippet") or "").lower()
-    ]
+    **문장 임베딩(sentence-transformers)은 여전히 안 쓴다** — 배포 환경엔
+    일부러 안 깔려 있다(torch 527MB+모델 458MB가 무료 티어엔 너무 커서,
+    requirements.txt 헤더 참고). 그 대신 relevance_model.py가 분류기 학습에
+    이미 쓰는 것과 같은 방식(문자 2~4-gram TF-IDF, 형태소 분석기 없이 한국어
+    처리)을 재사용한다 — scikit-learn은 이미 필수 의존성이라 배포 환경에서도
+    항상 동작한다.
+
+    **한계**: "생성형 AI"로 검색해도 "LLM"·"챗봇" 같은 **다른 단어를 쓴**
+    기사는 못 찾는다(진짜 동의어 매칭은 임베딩이 있어야 가능). 대신 단순
+    포함 검색과 달리 문구가 정확히 안 겹쳐도 **일부 단어(문자열)만 겹쳐도**
+    유사도 순위에 낀다 — 완전 일치보다는 넓게, 임베딩보다는 좁게 찾는
+    중간 지점이다."""
+    from sklearn.feature_extraction.text import TfidfVectorizer
+
+    texts = [f"{a['title']} {a.get('snippet') or ''}".strip() for a in articles]
+    vectorizer = TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 4), min_df=1)
+    doc_vecs = vectorizer.fit_transform(texts)
+    query_vec = vectorizer.transform([query])
+
+    similarities = (doc_vecs @ query_vec.T).toarray().ravel()
+    order = similarities.argsort()[::-1]
+    return [articles[i] for i in order if similarities[i] >= min_similarity][:top_k]
 
 
 def _render_keyword_tab(conn, run_id: int, fixed_keyword: dict, period_start) -> None:
@@ -483,13 +500,13 @@ def _render_keyword_tab(conn, run_id: int, fixed_keyword: dict, period_start) ->
     articles = dq.get_pool_articles(conn, run_id, fixed_keyword["id"])
 
     query = st.text_input(
-        "키워드로 검색(제목·요약에 그 단어가 그대로 들어있는 기사만 찾습니다)",
+        "키워드로 검색",
         key=f"kw_search_{fixed_keyword['id']}",
         placeholder="예: 생성형 AI",
     )
     if query.strip():
         articles = _search_by_keyword(articles, query.strip())
-        st.caption(f"'{query.strip()}'이(가) 포함된 기사 {len(articles)}건")
+        st.caption(f"'{query.strip()}'와(과) 유사한 기사 {len(articles)}건")
         _render_feedback_article_list(conn, fixed_keyword, articles, period_start)
         return
 
@@ -497,8 +514,88 @@ def _render_keyword_tab(conn, run_id: int, fixed_keyword: dict, period_start) ->
     _render_feedback_article_list(conn, fixed_keyword, articles, period_start)
 
 
+def _render_first_run_setup(conn) -> None:
+    """첫 실행 화면(2026-08-25) — 팀 이름·검색어·사이트를 딱 한 번 여기서
+    정한다. `fixed_keywords`가 비어있을 때만 나타나고, 한 번 설정하고 나면
+    다시 안 뜬다 — "한 배포 = 팀 하나"라 팀을 더 추가하는 화면은 없다.
+    다른 팀은 이 저장소를 통째로 포크해 따로 배포한다(README "다른 팀이
+    독립적으로 배포하기" 참고). 배포하는 사람은 `.env`/Streamlit Cloud
+    Secrets에 `DATABASE_URL`·`TAVILY_API_KEY`만 넣고 이 화면을 열면 된다 —
+    CLI를 몰라도 여기서 전부 끝난다.
+
+    제출하면 팀을 등록하고 **그 자리에서 곧바로 첫 수집까지 돌린다**
+    (pipeline_v2.run_pipeline을 그대로 재사용 — 매주 자동 수집(GitHub
+    Actions)과 완전히 같은 경로를 타서 "수동 첫 실행"과 "자동 주간 수집"이
+    다른 코드로 갈라지지 않는다). 최초 실행은 3주치를 한 번에 걷는
+    부트스트랩이라(db/weekly_run.target_weeks) 사이트·검색어 수에 따라
+    몇 분 걸릴 수 있다."""
+    from tech_monitoring.collectors.search_engine import KOREAN_DOMAINS, SITE_DOMAINS, SITE_NAMES
+
+    st.subheader("처음 오셨네요 — 팀을 설정해주세요")
+    st.caption(
+        "여기서 정한 이름·검색어·사이트로 앞으로 매주 자동 수집됩니다. "
+        "이 화면은 지금 한 번만 나오고, 완료되면 이 팀의 기사 목록이 기본 화면이 됩니다 — "
+        "이 링크에 접속하는 팀원은 전부 같은 기사·좋아요를 보게 됩니다."
+    )
+
+    name = st.text_input("팀 이름", key="setup_team_name", placeholder="예: 콘텐츠팀")
+    ko_terms = st.text_input(
+        "한국어 검색어(쉼표로 구분)", key="setup_team_ko", placeholder="예: 에듀테크, AI 튜터",
+    )
+    en_terms = st.text_input(
+        "영어 검색어(쉼표로 구분)", key="setup_team_en", placeholder="예: edtech AI, AI tutoring",
+    )
+    site_options = {d: SITE_NAMES.get(d, d) for d in SITE_DOMAINS}
+    selected_sites = st.multiselect(
+        "검색할 사이트(최소 1곳)",
+        options=list(site_options.keys()),
+        format_func=lambda d: site_options[d],
+        key="setup_team_sites",
+    )
+
+    if st.button("시작하기", type="primary"):
+        ko_list = [t.strip() for t in ko_terms.split(",") if t.strip()]
+        en_list = [t.strip() for t in en_terms.split(",") if t.strip()]
+        # 국내/해외 사이트를 하나라도 골랐는데 그 언어 검색어가 비어있으면
+        # _terms_for_domain이 넓은 질의로 폴백해 팀 색깔이 안 드러난다 —
+        # 설정 단계에서 미리 막는다(실사용 중 발견, 2026-08-25).
+        has_korean_site = any(d in KOREAN_DOMAINS for d in selected_sites)
+        has_english_site = any(d not in KOREAN_DOMAINS for d in selected_sites)
+        if not name.strip():
+            st.error("팀 이름을 입력하세요.")
+        elif not selected_sites:
+            st.error("사이트를 최소 1곳 선택하세요.")
+        elif not ko_list and not en_list:
+            st.error("검색어를 최소 1개 입력하세요.")
+        elif has_korean_site and not ko_list:
+            st.error("국내 사이트를 고르셨으니 한국어 검색어도 입력하세요 — 비워두면 넓은 질의로 대체돼 팀 색깔이 안 드러납니다.")
+        elif has_english_site and not en_list:
+            st.error("해외 사이트를 고르셨으니 영어 검색어도 입력하세요 — 비워두면 넓은 질의로 대체돼 팀 색깔이 안 드러납니다.")
+        else:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO fixed_keywords
+                        (keyword, display_order, active, search_terms_ko, search_terms_en, site_domains)
+                    VALUES (%s, 0, TRUE, %s, %s, %s)
+                    """,
+                    (name.strip(), ko_list, en_list, selected_sites),
+                )
+            with st.spinner("첫 수집 중입니다… 사이트·검색어 수에 따라 몇 분 걸릴 수 있습니다"):
+                from tech_monitoring.pipeline_v2 import run_pipeline
+                report = run_pipeline()
+            if report["failed"]:
+                st.error(
+                    f"'{name.strip()}' 팀은 등록됐지만 수집 중 일부 실패했습니다: {report['failed']} — "
+                    "DATABASE_URL·TAVILY_API_KEY를 확인한 뒤 새로고침하면 다시 시도할 수 있습니다."
+                )
+            else:
+                st.success(f"'{name.strip()}' 팀이 설정됐고 첫 수집도 끝났습니다.")
+            st.rerun()
+
+
 def main() -> None:
-    st.title("AX 시장 모니터링")
+    st.title("기사 모니터링")
 
     conn = _conn()
     run = dq.get_latest_run(conn)
@@ -506,12 +603,10 @@ def main() -> None:
 
     fixed_keywords = dq.get_fixed_keywords(conn)
     if not fixed_keywords:
-        st.warning(
-            "고정 키워드가 없습니다. "
-            "`./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py add \"<키워드>\"`로 등록하세요."
-        )
+        _render_first_run_setup(conn)
         return
     if run is None:
+        st.info("아직 수집된 데이터가 없습니다. 첫 수집은 파이프라인을 한 번 실행해야 합니다.")
         return
 
     period_start, _period_end = get_run_period(conn, run["id"])
@@ -526,7 +621,9 @@ def main() -> None:
     # 보이는 게 하나뿐이라는 사실과도 맞고, "전체 안 자르고 보여준다" 원칙도
     # 그대로 유지된다(그 하나의 시장 안에서는 여전히 전부 보여준다).
     # 기사 목록이 기본 화면이라 앞에 둔다(2026-08-24 담당자 요청) — 성능은
-    # 보조 지표라 뒤로.
+    # 보조 지표라 뒤로. "한 배포 = 팀 하나"(2026-08-25)로 fixed_keywords는
+    # 보통 1개뿐이라 사실상 "<팀 이름>"/"📈 성능" 두 탭만 남는다 — 화면에서
+    # 팀을 더 추가하는 기능은 없다(README "다른 팀이 독립적으로 배포하기").
     options = [kw["keyword"] for kw in fixed_keywords] + ["📈 성능"]
     selected = st.segmented_control("보기", options, default=options[0], label_visibility="collapsed")
     if not selected:          # single-select라 같은 항목을 다시 누르면 선택 해제된다
