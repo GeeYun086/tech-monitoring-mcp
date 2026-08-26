@@ -1,171 +1,139 @@
-# tech-monitoring-mcp
+# 기사 모니터링 (tech-monitoring-mcp)
 
-팀이 정한 검색어·사이트로 매주 기사를 모으고, 사람이 매긴 👍/👎로 학습한
-분류기가 순위를 매겨주는 **기사 모니터링** 도구. 원래 goormEDU 전략기획팀의
-AX(AI 전환) 시장 모니터링용으로 시작했지만, 팀마다 검색어·사이트·이름을
-따로 설정해 이 저장소를 포크해 쓸 수 있게 일반화됐다(2026-08-25, "다른 팀이
-독립적으로 배포하기" 참고).
+팀이 관심 있는 주제에 대해 **매주 자동으로 관련 기사를 모아 보여주는
+도구**입니다. 기사에 👍/👎를 누르면 그 판단을 학습한 분류기가 팀의 취향에
+맞춰 기사 순위를 스스로 조정하고, Claude는 MCP로 이 데이터를 직접 읽어
+주간 인사이트를 만들어줍니다.
 
-## v2 아키텍처 (2026-08-13 피벗)
+원래 goormEDU 전략기획팀이 AX(AI 전환) 시장을 모니터링하려고 만들었지만,
+어떤 팀이든 검색어·수집 사이트·팀 이름만 정하면 이 저장소를 포크해 자기
+팀 전용으로 쓸 수 있도록 일반화되어 있습니다.
 
-기존(v1)은 RSS로 넓게 수집한 뒤 임베딩·룰 기반으로 관련도·파급력을 사후
-판별하는 방식이었다. 노이즈가 많고 판별 정확도도 낮아, **노이즈를 수집
-단계에서 원천 차단**하는 방식으로 전환했다.
+## 무엇을 하는 도구인가요?
+
+- **자동 수집** — 팀이 정한 검색어로, 팀이 고른 뉴스 사이트에서 매주 월요일
+  기사를 자동으로 모읍니다(Tavily Search API).
+- **좋아요 기반 순위 학습** — 기사마다 👍/👎를 누르면, 그 판단을 학습 데이터
+  삼아 로컬 분류기(scikit-learn)가 "이 팀에 도움되는 기사"를 자동으로 위로
+  올려줍니다. 좋아요는 익명 집계라 누가 눌렀는지는 기록되지 않습니다.
+- **국내 매체 우선 정렬** — 해외 기사에 묻히지 않도록 국내 매체 기사를
+  먼저 보여줍니다.
+- **키워드 검색** — 이미 모아둔 이번 주 기사 안에서 제목·요약을 검색합니다.
+- **성능 확인** — 분류기가 실제로 얼마나 잘 맞히는지 정확도·정밀도·재현율로
+  확인할 수 있습니다.
+- **Claude 연동(MCP)** — Claude가 이번 주 기사·인기 기사를 직접 조회해
+  주간 보고서나 인사이트를 써줄 수 있습니다.
+- **팀별 독립 배포** — 이 저장소를 포크해 각자 배포하면, 팀마다 완전히
+  독립된 검색어·기사·좋아요·학습 데이터를 갖습니다. 한 팀의 배포 링크에
+  접속한 사람들끼리만 데이터를 공유합니다.
+
+## 빠른 시작 — 우리 팀 배포 만들기
+
+1. 이 저장소를 [Fork](https://github.com/GeeYun086/tech-monitoring-mcp/fork)합니다.
+2. [Supabase](https://supabase.com)에서 무료 프로젝트를 만들고 `DATABASE_URL`을 받습니다.
+3. [Tavily](https://tavily.com)에서 무료 API 키를 발급받습니다(카드 등록 불필요).
+4. 포크한 저장소를 [Streamlit Community Cloud](https://streamlit.io/cloud)에 배포하고,
+   Secrets에 `DATABASE_URL`·`TAVILY_API_KEY`를 등록합니다.
+5. 배포된 링크를 열면 **"처음 오셨네요 — 팀을 설정해주세요"** 화면이 뜹니다.
+   팀 이름, 검색어(한국어/영어), 수집할 사이트를 입력하고 "시작하기"를
+   누르면 그 자리에서 첫 수집까지 끝납니다.
+6. 저장소 Settings → Actions에서 GitHub Actions를 켜고, 같은 두 값을
+   Secrets에 등록하면 이후 매주 월요일 자동으로 새 기사를 수집합니다.
+7. 배포 링크를 팀원에게 공유하세요. 접속한 사람은 전부 같은 기사·좋아요를
+   보고, 좋아요는 이 팀 안에서만 쌓여 학습됩니다.
+
+계정 생성과 발급받은 키를 GitHub/Streamlit Secrets에 입력하는 것은 사람이
+직접 해야 합니다(AI 에이전트가 대신할 수 없는 영역입니다) — 그 외 코드
+작업(포크 손보기, 새 사이트 추가 등)은 Claude Code에 맡겨도 됩니다.
+자세한 단계별 설명은 [배포 가이드](#배포-가이드)를 참고하세요.
+
+## 대시보드 사용법
+
+배포된 링크를 열면 두 개의 탭이 있습니다.
+
+- **`<팀 이름>` 탭(기본 화면)** — 이번 주 수집된 기사 전체를 보여줍니다.
+  국내 매체 우선, 그다음 좋아요 많은 순, 그다음 분류기 점수순으로
+  정렬됩니다. 각 기사 아래 👍/👎로 판단을 남기면 곧바로 저장되고, 라벨이
+  5건 쌓일 때마다 분류기가 자동으로 다시 학습해 순위를 갱신합니다.
+  상단 검색창에 키워드를 넣으면 이번 주 기사 안에서 제목·요약이 비슷한
+  것부터 찾아줍니다.
+- **📈 성능 탭** — 지금까지 쌓인 좋아요/싫어요로 분류기를 채점합니다.
+  정확도는 항상 "무조건 다수 쪽으로 찍었을 때"의 기준선과 함께 표시되어
+  착시 없이 볼 수 있습니다.
+
+## 아키텍처 한눈에 보기
 
 ```
-Tavily Search API + 코드로 관리하는 화이트리스트(SITE_INCLUDE/EXCLUDE_PATTERNS)
-    ↓ time_range=week(지난 1주일), 고정 키워드×사이트 조합마다 개별 호출,
-    ↓ top20 같은 인위적 컷 없이 넓게 수집 + 화이트리스트 패턴으로 최종 필터
-search_results (원본 기사 풀)
-    ↓ TF-IDF(코드, 정확한 카운팅) — 한글/영문 비대칭 처리
-후보 키워드 목록
-    ↓ Gemini(동의어 그룹핑만 — 숫자 계산은 시키지 않음)
-    ↓ 코드가 그룹별 문서 집합을 합집합으로 재계산(doc_count 확정)
-market_keywords ("이번 주 주요 키워드" 최종 목록)
+팀 설정(이름 · 검색어 · 수집 사이트)
+    ↓
+Tavily Search API로 사이트별 수집 + URL 화이트리스트로 이중 검증
+    ↓
+collected_articles (이번 주 기사 풀)
+    ↓ 사람이 매긴 👍/👎(anonymous)를 학습 데이터로
+로컬 분류기(문자 n-gram TF-IDF 또는 다국어 문장 임베딩) → 관련도 점수
+    ↓
+대시보드(Streamlit) 정렬·표시, MCP 서버로 Claude가 직접 조회
 ```
 
-**"이번 주 주요 키워드" 화면·이 Gemini 단계는 2026-08-24부로 `pipeline_v2`
-(주간 자동 수집)에서 뺐다** — 품질(대문자 시작 휴리스틱 기반) 대비 매주
-Gemini를 호출하는 비용이 아깝다는 담당자 판단. `analysis/keyword_merge.py`
-모듈 자체와 `pipeline_v3`(아래 "v2 vs v3 비교 실험", 자동 실행 아님)는
-그대로 남아 있다.
+**매주 데이터를 통째로 비우고 다시 모읍니다.** 무료 DB 티어를 유지하기
+위한 설계로, `fixed_keywords`(팀 설정)와 `article_labels`(사람이 매긴
+판단)만 보존되고 나머지 수집 데이터는 매주 새로 채워집니다. 좋아요·라벨은
+절대 사라지지 않습니다.
 
-관련도 판별 단계가 따로 없다 — 큐레이션된 화이트리스트 자체가 관련도를
-보장한다는 게 이 피벗의 핵심 전제다. "파급력"도 별도 스코어링 없이
-**언급량(doc_count) 자체가 신호**라는 더 단순한 모델을 쓴다(사건 단위
-교차보도 클러스터링은 검토 후 제외 — 자세한 배경은 git 히스토리·PR 참고).
+## 배포 가이드
 
-**검색 API로 원래 Google Custom Search JSON API를 쓰려 했으나(2026-08-13
-실제 연동 중 발견) Google이 2025년 중반 이후 신규 계정에는 이 API 접근을
-막아둬서(2027-01-01 서비스 종료 예정 공지) Tavily Search API로 교체했다.**
-Tavily는 `include_domains`/`exclude_domains`를 API 파라미터로 직접 받아서
-Google처럼 별도 "검색엔진" 설정을 웹 UI에서 만들 필요가 없고, `time_range`로
-기간 제한도 네이티브 지원, 무료 티어 월 1,000크레딧(카드 등록 불필요)이다.
-다만 Tavily의 도메인/경로 매칭 정확도를 100% 신뢰하지 않고, **화이트리스트
-최종 판정은 `collectors/search_engine.py`의 `is_allowed_url()`(담당자가
-검증한 패턴, 코드로 직접 매칭)이 이중으로 강제한다.**
+### 새 팀으로 독립 배포하기
 
-**무료 DB 티어 유지 방침**: 매주 데이터를 통째로 비우고 재수집한다.
-`fixed_keywords`(모니터링 대상 시장 설정)만 보존되고 나머지는
-`TRUNCATE weekly_runs RESTART IDENTITY CASCADE`로 매주 wipe된다.
+"빠른 시작"의 자세한 버전입니다.
 
-v1(RSS 수집 + 임베딩 기반 필터링)은 `db/migrations_v1_archive/`에 스키마만
-남아 있다 — 왜 그 방식을 버렸는지의 조사 기록이라 지우지 않았다.
+1. **저장소 포크** — GitHub에서 Fork.
+2. **Supabase 프로젝트 생성**(무료 티어) → `DATABASE_URL` 확보.
+3. **Tavily API 키 발급**([tavily.com](https://tavily.com), 무료 티어, 카드 등록 불필요).
+4. 포크한 저장소를 로컬에 클론해 `.env`에 위 두 값을 넣고 스키마를 적용합니다:
+   ```bash
+   cp .env.example .env   # DATABASE_URL, TAVILY_API_KEY 채우기
+   ./.venv/Scripts/python.exe -m tech_monitoring.db.migrate
+   ```
+5. **GitHub Actions 활성화** — 포크 저장소는 Actions가 기본적으로 꺼져
+   있습니다(GitHub 보안 기본값). 저장소의 Actions 탭에서 켠 뒤, Settings →
+   Secrets and variables → Actions에 `DATABASE_URL`·`TAVILY_API_KEY`를
+   등록하면 `weekly-collect.yml`이 매주 월요일 자동으로 돕니다.
+6. **Streamlit Cloud에 배포** — 포크 저장소를 연결하고 Main file path를
+   `app/streamlit_app.py`로, Secrets에 `DATABASE_URL`·`TAVILY_API_KEY`를
+   등록합니다. (`TAVILY_API_KEY`는 다음 단계의 첫 수집에 쓰입니다 — 평소
+   화면 자체는 Tavily를 호출하지 않습니다.)
+7. **배포 링크를 열어 팀 설정** — "처음 오셨네요" 화면에서 팀 이름·검색어·
+   사이트를 입력하고 "시작하기"를 누르면 등록과 동시에 첫 수집이 돕니다
+   (사이트·검색어 수에 따라 몇 분 걸릴 수 있습니다). 이 화면은 한 번만
+   나타나고, 이후로는 이 팀의 기사 목록이 기본 화면이 됩니다.
+8. 배포 링크를 팀원에게 공유합니다.
 
-## 개발 환경 세팅
+### 기존 배포에 로컬 개발 환경 붙이기
+
+이미 있는 팀 DB(예: goormEDU 전략기획팀 배포)에 로컬 PC로 붙어서
+개발·디버깅하려면:
 
 ```bash
 py -3.12 -m venv .venv
 ./.venv/Scripts/python.exe -m pip install -e .
-cp .env.example .env
+cp .env.example .env   # 담당자에게 받은 DATABASE_URL로 채우기
+./.venv/Scripts/python.exe -m tech_monitoring.db.migrate   # 이미 최신이면 전부 건너뜀
+./.venv/Scripts/python.exe -m pytest tests/ -q              # 세팅 확인
 ```
 
-`.env`에 채울 것:
-- `DATABASE_URL` — **팀 공용 Supabase 주소**(담당자에게 받는다). `.env.example`의
-  `localhost` 기본값을 그대로 두면 안 된다 — 아래 "새 PC에서 시작할 때" 참고
-- `TAVILY_API_KEY` — [tavily.com](https://tavily.com)에서 발급(무료 티어, 카드 등록 불필요).
-  화이트리스트 사이트 목록은 `collectors/search_engine.py`의
-  `SITE_INCLUDE_PATTERNS`/`SITE_EXCLUDE_PATTERNS`에 코드로 관리(수정 시 이 파일만 고치면 됨).
-  현재 **17곳** — 일반 테크 6곳 + 교육 매체 4곳 + 국내 IT 7곳(2026-08-24
-  ZDNet Korea·디지털데일리·바이라인네트워크·디지털투데이·테크M 5곳 추가, 아래 참고)
-- `GEMINI_API_KEY` — **주간 자동 수집(`pipeline_v2`)은 2026-08-24부로 이 키를
-  쓰지 않는다.** `analysis/keyword_merge.py`를 단독 실행하거나 `pipeline_v3`
-  비교 실험을 돌릴 때만 필요(동의어 병합용, 비어 있어도 단독 그룹 폴백)
+**절대 `.env.example`의 `localhost` 기본값을 그대로 두지 마세요.** 그러면
+로컬에만 존재하는 빈 DB를 보게 되어, 기사를 새로 수집하느라 Tavily
+크레딧을 낭비하고 라벨(팀의 판단 자산)이 갈라집니다. 항상 팀이 쓰는
+Supabase 주소를 넣으세요 — DB는 이미 클라우드에 있으므로 별도로 띄울 것이
+없습니다. `docker-compose.yml`의 Postgres는 순수 로컬 실험 전용입니다.
 
-```bash
-./.venv/Scripts/python.exe -m tech_monitoring.db.migrate   # 스키마 적용(db/migrations/)
-./.venv/Scripts/python.exe -m pytest tests/ -q             # 세팅 확인
-```
+### 설정값(Secrets) 참고
 
-### 새 PC에서 시작할 때 — DB를 새로 만들지 말 것
-
-**마이그레이션·수집한 기사·라벨은 전부 DB에 묶여 있지 컴퓨터에 묶여 있지
-않다.** 그래서 새 PC에서 해야 할 일은 위 세 줄과 `.env`에 **기존 Supabase
-주소를 넣는 것**뿐이다. 그러면
-
-- 마이그레이션은 전부 `skipping ... (already applied)`로 건너뛰고,
-- 이미 수집된 기사를 그대로 쓰므로 **Tavily 크레딧이 0**이며,
-- 라벨이 한 곳에 쌓인다(`labeled_by`로 사람 구분 — 005 마이그레이션).
-
-Supabase는 이미 클라우드에 떠 있으므로 **따로 배포할 것이 없다**. 별도로
-배포가 필요한 건 앱(대시보드·MCP)이지 DB가 아니다.
-
-> **2026-08-19 실제 사고**: 새 PC에서 `.env.example`을 그대로 복사해
-> `localhost`를 보게 됐다. 그 결과 빈 DB가 하나 더 생겨 마이그레이션을
-> 처음부터 다시 적용했고, 기사를 다시 수집하느라 크레딧을 두 번 썼으며,
-> 라벨이 두 DB로 갈라질 뻔했다. `.env.example` 상단 주석은 이 재발을 막기
-> 위한 것이다.
-
-`docker-compose.yml`의 Postgres는 **로컬 실험 전용**이다. 평소 개발에서 이걸
-띄우면 위와 같은 두 번째 DB가 생긴다.
-
-### 이미 두 개의 DB로 갈라졌다면
-
-라벨만 옮기면 된다(기사는 다시 수집하면 되지만 라벨은 사람 손이 들어간
-자산이다). 옮긴 뒤 로컬 DB는 버려도 된다.
-
-```bash
-pg_dump -t article_labels --data-only <옛DB> | psql <공용Supabase>
-```
-
-## Streamlit Cloud 배포 — 담당자와 함께 라벨링하기
-
-담당자에게 링크만 주고 브라우저에서 기사마다 👍/👎를 누르게 하는 게
-가장 빠르다. **DB(Supabase)가 이미 클라우드에 있으므로 누른 라벨은 곧바로
-같은 DB에 쌓인다** — 담당자 쪽에 설치할 것이 없다.
-
-### 좋아요는 익명이다 — LABELED_BY 설정이 필요 없다(2026-08-24 이후)
-
-예전엔(2026-08-19) 별도 "라벨링" 화면이 있었고 `LABELED_BY` secret으로
-"누구 이름으로 저장할지"를 정했다. **지금은 기사 목록에 인라인 👍/👎만
-있고, 누를 때마다 무작위 토큰이 발급된다**(labeling.fetch_like_counts
-헤더 참고) — 그래서 `LABELED_BY`를 따로 안 정해도, 여러 사람이 같은
-링크로 눌러도 각자의 클릭이 그대로 쌓인다. 개수만 세고 "누가 눌렀는지"는
-애초에 안 남기는 설계다.
-
-배포 설정:
-- Main file path: `app/streamlit_app.py`
-- Python: 3.12 (`pyproject.toml`의 `requires-python`)
-- Secrets: `DATABASE_URL`·`TAVILY_API_KEY` 둘 다 필요하다. `TAVILY_API_KEY`는
-  평소 화면(키워드 검색은 이미 모아둔 기사 안에서 TF-IDF로 찾아 Tavily를
-  안 부른다)엔 안 쓰이지만, **첫 실행 설정 화면("처음 오셨네요")이 팀을
-  등록하는 그 자리에서 곧바로 첫 수집을 돌리기 때문에** 배포 환경에도
-  있어야 한다("고정 키워드 설정" 절 참고).
-- 무료 앱은 링크를 아는 누구나 들어오고 DB에 쓸 수 있다. 비공개(이메일 초대)
-  설정을 쓰거나 링크를 사내에만 공유할 것.
-
-### torch를 넣지 않는다
-
-`requirements.txt`는 이 프로젝트만 설치하고 `[embedding]` extra는 뺀다.
-sentence-transformers는 torch(설치 527MB) + 다국어 모델(실행 시 458MB)을
-끌고 와서 무료 티어로는 감당이 안 된다. 없으면 임베딩 방식만 건너뛰고
-(`relevance_model.evaluate`가 ImportError를 잡아 `reason`에 담는다) TF-IDF로만
-채점하며 **라벨링 화면은 그대로 동작한다.**
-
-실측(2026-08-19, requirements.txt만 설치한 새 venv): 597MB, torch 미설치,
-라벨링 후보 조회·주차 선택·채점·기사 목록까지 전 경로 정상. 다만 그 환경에서
-TF-IDF는 찍기 기준선을 못 넘어(정확도 0.550 vs 0.567) `build_model`이 None을
-돌려주고 화면이 최신순을 유지했다 — **배포 앱의 목적은 라벨 수집**이고,
-임베딩 비교와 순위 갱신은 개발 PC에서 한다.
-
-### 모델은 파일이 아니라 라벨에서 만든다
-
-배포 환경의 파일시스템은 재시작하면 초기화된다. 그래서 판단 경로가
-`models/*.joblib`에 의존하지 않고 DB 라벨에서 그때그때 학습한다(작업 6,
-`relevance_filter.get_model`). 라벨만 남아 있으면 언제든 같은 모델이 복원된다.
-
-### 지금은 통합 모델 — 나중에 개인 모델로 분리 가능
-
-현재 `get_model`은 **전체 라벨**로 학습하고, 점수(`article_keyword_relevance`)도
-사람 구분 없이 한 벌이라 기사 순서는 모두에게 같다. 라벨 자체는 이미
-`labeled_by`로 나뉘어 쌓이므로(005) 나중에 개인 모델로 바꿀 수 있다 —
-`get_model`에 `labeled_by`를 넘기고(=`fetch_all_labels`가 이미 지원),
-점수 테이블에 사람 구분을 추가하면 된다. 반대 방향(기록 없이 시작한 뒤
-분리)은 불가능하므로 순서가 이렇게 된 것이다.
-
-어느 쪽이 맞는지는 감으로 정하지 않는다 — 같은 `(url_norm, fixed_keyword_id)`에
-사람마다 다른 label이 남으면 그게 곧 "팀 기준이 얼마나 다른가"이고, 이 불일치가
-낮으면 통합, 높으면 개인이 맞다는 근거가 된다(005 헤더 참고).
+| 값 | 어디에 필요한가 | 비고 |
+| --- | --- | --- |
+| `DATABASE_URL` | 로컬 `.env`, Streamlit Cloud, GitHub Actions | Supabase Postgres 연결 문자열 |
+| `TAVILY_API_KEY` | 로컬 `.env`, Streamlit Cloud, GitHub Actions | 기사 수집용. 무료 티어 월 1,000크레딧, 카드 등록 불필요 |
+| `GEMINI_API_KEY` | 로컬 `.env`(선택) | 매주 자동 수집에는 안 쓰임. `analysis/keyword_merge.py`를 단독 실행할 때만 필요 |
 
 ## MCP 서버 — Claude가 수집 결과를 직접 조회
 
@@ -173,41 +141,29 @@ TF-IDF는 찍기 기준선을 못 넘어(정확도 0.550 vs 0.567) `build_model`
 ./.venv/Scripts/python.exe -m tech_monitoring.mcp_server
 ```
 
-**읽기 전용이다.** 수집·라벨링·학습은 파이프라인과 대시보드가 하고, 여기서는
-이미 DB에 있는 결과를 꺼내 보여주기만 한다. 그래서 이 서버에는 머신러닝
-라이브러리가 필요 없다 — 분류기 판단은 파이프라인이 미리 끝내
-`article_keyword_relevance.score`에 저장해두기 때문이다(psycopg만 있으면 된다).
+읽기 전용입니다 — 수집·학습은 파이프라인과 대시보드가 하고, MCP 서버는
+이미 DB에 있는 결과를 꺼내 보여주기만 합니다. 그래서 머신러닝 라이브러리가
+필요 없습니다(psycopg만 있으면 됩니다).
 
 | 도구 | 하는 일 |
 | --- | --- |
-| `get_status` | 기준 기간·기사 수·주차별 건수·시장 목록·라벨 현황(+파이프라인 실패 사유) |
+| `get_status` | 기준 기간·기사 수·주차별 건수·시장 목록·라벨 현황 |
 | `get_markets` | 시장 목록과 시장별 라벨 진행 상황 |
-| `get_articles(market, limit)` | 한 시장의 기사 — **국내 매체 우선** + 좋아요 수 + 분류기 점수순(모델이 없으면 최신순), 기사마다 `like_count`/`dislike_count` 포함 |
-| `get_popular_articles(market, limit)` | 한 시장에서 👍를 가장 많이 받은 기사만(2026-08-25 추가) — 주간 인사이트·보고서를 쓸 때 분류기 점수보다 먼저 참고할 값. 좋아요 0건인 기사는 제외하고, 좋아요는 익명 집계라 "누가"는 알 수 없다는 안내를 응답에 함께 담는다 |
-| `get_keywords(market, limit)` | 한 시장의 주요 키워드(보조 지표) — 2026-08-24부로 파이프라인이 `market_keywords`를 더 이상 채우지 않아 빈 결과를 돌려준다 |
+| `get_articles(market, limit)` | 한 시장의 기사 — 국내 매체 우선 + 좋아요 수 + 분류기 점수순 |
+| `get_popular_articles(market, limit)` | 👍를 가장 많이 받은 기사만 — 주간 인사이트·보고서를 쓸 때 분류기 점수보다 먼저 참고할 값 |
+| `get_keywords(market, limit)` | 한 시장의 주요 키워드(보조 지표) |
 
-응답에 **순서의 근거**(`ordering`)와 **전체 건수**(`total`)를 함께 담는다 —
-모델이 없어 최신순인 걸 모르면 추천 순위로 오해하고, 응답 길이 때문에 자른
-것을 "이게 전부"로 읽는다. 모르는 시장 이름을 물으면 빈 결과 대신 등록된
-시장 목록을 돌려준다.
+응답에는 정렬 근거(`ordering`)와 전체 건수(`total`)가 함께 담겨, 잘린
+결과나 임시 정렬을 추천 순위로 오해하지 않게 합니다.
 
 ### 도커로 배포하기 (남에게 줄 때)
 
-받는 사람이 Python·가상환경·의존성을 만질 필요 없이 `docker run` 한 줄이면 된다.
-**저장소를 클론할 필요도 없다** — `.github/workflows/publish-mcp-image.yml`이
-`main`에 `src/tech_monitoring/**`나 `Dockerfile`이 바뀔 때마다 자동으로 이미지를
-구워 GHCR(GitHub Container Registry)에 올려둔다.
+저장소를 클론할 필요 없이 `docker run` 한 줄이면 됩니다. `main`에 소스가
+바뀔 때마다 GitHub Actions가 자동으로 이미지를 구워 GHCR에 올려둡니다.
 
 ```bash
 docker pull ghcr.io/geeyun086/tech-monitoring-mcp:latest
 ```
-
-> 이 저장소가 비공개라 GHCR 이미지도 비공개다. 받는 사람이 이 저장소에 접근
-> 권한이 있다면, `docker pull` 전에 한 번 로그인해야 한다:
-> `echo <개인 액세스 토큰(read:packages)> | docker login ghcr.io -u <GitHub 아이디> --password-stdin`
-
-Claude Desktop 등의 MCP 설정에 이렇게 등록한다(`DATABASE_URL`은 컨테이너에
-굽지 않고 실행할 때 넘긴다 — 이미지에 비밀번호가 들어가면 안 된다):
 
 ```json
 {
@@ -222,31 +178,14 @@ Claude Desktop 등의 MCP 설정에 이렇게 등록한다(`DATABASE_URL`은 컨
 }
 ```
 
-이미지를 직접 빌드하고 싶으면(예: 로컬에서 Dockerfile을 수정해 확인할 때):
+이 저장소가 비공개라 이미지도 비공개입니다. 접근 권한이 있다면 pull 전에
+한 번 로그인하세요: `echo <개인 액세스 토큰(read:packages)> | docker login ghcr.io -u <GitHub 아이디> --password-stdin`
 
-```bash
-docker build -t tech-monitoring-mcp .
-```
+이미지는 머신러닝 라이브러리 없이 psycopg + mcp만 담아 가볍습니다(약
+274MB). 로컬에서 직접 빌드하려면 `docker build -t tech-monitoring-mcp .`
 
-**이미지에 머신러닝 라이브러리를 넣지 않는다.** MCP 서버는 읽기 전용이라
-분류기를 돌리지 않는다 — 판단은 파이프라인이 미리 끝내 점수로 저장해둔다.
-그래서 psycopg + mcp만 들어가고 **274MB**에 머문다(프로젝트 전체를 설치하면
-streamlit·scikit-learn까지 딸려와 쓰지도 않을 것으로 몇 배가 된다). 같은 이유로
-`pip install .` 대신 소스만 복사하고 `PYTHONPATH`로 잡는다.
-
-> **mcp 버전 상한(`<2`)은 필수다.** 2.0.0에서 `mcp.server.fastmcp`가 사라져
-> `server.py`의 import가 깨진다. 실측 2026-08-19: `>=1.2`로 열어뒀더니 로컬
-> `.venv`(1.29.0)는 멀쩡한데 **새로 만든 컨테이너만 2.0.0을 받아** 즉시
-> 종료됐다 — 새 환경에서만 터지는 종류의 함정이라 `pyproject.toml`에도 같은
-> 상한을 넣었다.
-
-실측 검증(2026-08-19): 컨테이너 안에 torch·scikit-learn·streamlit이 없는 것을
-확인하고, 실제 stdio 클라이언트를 붙여 핸드셰이크 → 도구 4개 → `get_status`
-(기사 415건·라벨 139건) → `get_articles` 호출까지 통과.
-
-저장소 루트의 `.mcp.json`에 이미 설정돼 있어 Claude Code에서는 그대로 잡힌다.
-Claude Desktop 등 다른 클라이언트는 아래처럼 등록한다(`DATABASE_URL`은 `.env`
-에서 읽으므로 보통 `env`를 따로 줄 필요가 없다).
+Claude Code에서는 저장소 루트의 `.mcp.json`으로 자동 연결됩니다. 다른
+클라이언트(Claude Desktop 등)는 아래처럼 등록합니다:
 
 ```json
 {
@@ -259,441 +198,141 @@ Claude Desktop 등 다른 클라이언트는 아래처럼 등록한다(`DATABASE
 }
 ```
 
-## 고정 키워드(모니터링 대상 시장) 설정
+## 팀 설정 나중에 바꾸기
 
-**한 배포 = 팀 하나다(2026-08-25 재설계).** 팀 이름·검색어·사이트는
-**화면의 첫 실행 설정에서** 정한다 — `fixed_keywords`가 비어있으면
-`app/streamlit_app.py`가 CLI 없이 설정 화면을 바로 보여주고, 제출하면
-그 자리에서 첫 수집까지 끝낸다(`_render_first_run_setup` 참고). 한 번
-설정하고 나면 이 화면은 다시 안 뜨고, 그 뒤로는 매주 이 설정 그대로
-자동 수집된다. 다른 팀은 이 저장소를 통째로 포크해 따로 배포한다(아래
-"다른 팀이 독립적으로 배포하기" 참고) — 화면에서 팀을 더 추가하는
-기능은 없다.
-
-CLI(`scripts/manage_fixed_keywords.py`)는 **이미 설정된 팀을 나중에
-조정할 때**(이름 변경·검색어/사이트 재설정·비활성화)만 쓴다:
+배포 후에도 팀 이름·검색어·수집 사이트를 CLI로 조정할 수 있습니다:
 
 ```bash
 ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py list
 ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py set-terms "<팀 이름>" --ko "AI 교육,에듀테크" --en "AI education,edtech"
 ./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py set-sites "<팀 이름>" --sites "aitimes.com,edu.donga.com"
+./.venv/Scripts/python.exe scripts/manage_fixed_keywords.py rename "<옛 이름>" "<새 이름>"
 ```
 
-**주의**: 사이트는 화면에서도 CLI에서도 **이미 검증된 화이트리스트
-중에서만** 고를 수 있다 — 완전히 새로운 사이트는 URL이 진짜 기사 페이지인지
-사람이 한 번은 확인해야 해서(아래 "새 수집 사이트 추가하기" 참고)
-자동화돼 있지 않다.
-
-## 다른 팀이 독립적으로 배포하기
-
-**완전히 다른 조직/예산으로 쓰고 싶은 팀**은 이 저장소를 포크해서 자기
-몫의 Supabase·Tavily 무료 티어로 따로 배포하면 된다 — 팀마다 무료 한도를
-새로 받는 셈이라 이쪽이 더 낫다. 그 포크 하나 = 그 팀 전용 배포다.
-
-**Claude Code한테 통째로 맡길 수는 없다** — 계정 생성(Supabase·Tavily)과
-발급받은 키를 GitHub/Streamlit Cloud Secrets에 입력하는 건 AI 에이전트가
-대신 할 수 없는 영역이다(자격증명 관련 행동 정책). 아래 1~3번(계정 만들고
-키 발급)만 사람이 직접 하고, 그다음(포크한 코드 손보기·마이그레이션)은
-Claude Code에 시켜도 된다.
-
-1. **저장소 포크** — GitHub에서 Fork.
-2. **자기 Supabase 프로젝트 생성**(무료 티어) → `DATABASE_URL` 확보.
-3. **자기 Tavily API 키 발급**([tavily.com](https://tavily.com), 무료 티어,
-   카드 등록 불필요).
-4. 포크한 저장소를 로컬에 클론해 `.env`에 위 두 값을 넣고 마이그레이션 적용:
-   ```bash
-   ./.venv/Scripts/python.exe -m tech_monitoring.db.migrate
-   ```
-5. **GitHub Actions 활성화** — 포크 저장소는 Actions가 기본적으로 꺼져 있다
-   (GitHub의 보안 기본값). 저장소의 Actions 탭에서 켠 뒤, Settings →
-   Secrets and variables → Actions에 `DATABASE_URL`·`TAVILY_API_KEY`를
-   등록해야 `weekly-collect.yml`이 매주 월요일 자동으로 돈다.
-6. **Streamlit Cloud에 자기 앱으로 배포** — 포크 저장소를 연결하고
-   `DATABASE_URL`·`TAVILY_API_KEY`를 Secrets에 등록한다("Streamlit Cloud
-   배포" 절 참고 — 첫 실행 설정 화면이 그 자리에서 수집을 돌리므로
-   `TAVILY_API_KEY`가 배포 환경에도 있어야 한다).
-7. **링크를 열어 팀 설정** — 배포된 링크를 열면 "처음 오셨네요" 설정
-   화면이 뜬다. 팀 이름·검색어·사이트를 입력하고 "시작하기"를 누르면
-   등록과 동시에 첫 수집이 돈다(사이트·검색어 수에 따라 몇 분 걸릴 수
-   있음). 끝나면 이 링크를 팀원에게 공유한다 — 접속한 사람 전부 같은
-   팀의 기사·좋아요를 본다.
+검색어를 비우면 넓은 질의("AI"/"인공지능")로, 사이트를 비우면 전체
+화이트리스트로 동작합니다.
 
 ### 새 수집 사이트 추가하기
 
-`set-sites`는 기존 화이트리스트 안에서만 고를 수 있다. 완전히 새로운
-사이트를 추가하려면(코드 수정 필요):
+화면에서도 CLI에서도 **이미 검증된 화이트리스트 사이트 중에서만** 고를 수
+있습니다. 완전히 새로운 사이트를 추가하려면 코드 수정이 필요합니다:
 
-1. 그 사이트에서 실제 기사 URL 몇 개를 모아 공통 패턴을 확인한다(예:
+1. 그 사이트에서 실제 기사 URL 몇 개를 모아 공통 패턴을 확인합니다(예:
    `articleView.html?idxno=12345`).
 2. `collectors/search_engine.py`의 `SITE_INCLUDE_PATTERNS`/
    `SITE_EXCLUDE_PATTERNS`/`SITE_DOMAINS`/`KOREAN_DOMAINS`/`SITE_NAMES`에
-   추가한다(기존 17곳 항목을 참고).
+   추가합니다(기존 17곳 항목을 참고).
 3. `tests/test_search_engine.py`에 그 사이트의 실제 URL로 통과/차단
-   테스트를 추가해 패턴을 검증한다.
+   테스트를 추가해 패턴을 검증합니다.
 
-패턴 검증 없이 사이트를 추가하면 홈페이지·광고·목록 페이지가 기사인 것처럼
-섞여 들어온다 — 그래서 이 단계만큼은 자동화하지 않았다.
+패턴 검증 없이 사이트를 추가하면 홈페이지·목록·광고 페이지가 기사인 것처럼
+섞여 들어오기 때문에, 이 단계만큼은 자동화하지 않았습니다.
 
-## 파이프라인 실행
+## 파이프라인 상세
 
 ```bash
 ./.venv/Scripts/python.exe -m tech_monitoring.pipeline_v2
 ```
 
-순서: (매주 데이터 wipe) → run 시작 → **검색엔진 수집(사이트별 공용
-기사 풀, 006)** → **관련도 점수(분류기, 007 — 모델이 없으면 건너뜀)**.
-2026-08-24부로 merge_keywords(Gemini 동의어 병합) 단계는 뺐다(pipeline_v2.py
-헤더 참고) — "이번 주 주요 키워드" 화면 자체를 없앴다. 한 사이트가 실패해도
-나머지는 계속 진행되고, 실패한 항목은 반환값의 `failed`에 남는다(항목별
-`error`도 실패로 집계한다 — 조용히 성공으로 마감되던 문제를 막기 위해).
+순서: (매주 데이터 wipe) → run 시작 → **팀 설정대로 사이트별 수집** →
+**분류기로 관련도 점수 매기기**(모델이 없으면 건너뜀). 한 사이트가
+실패해도 나머지는 계속 진행되고, 실패한 항목은 반환값의 `failed`에
+남습니다.
 
-### 수집원·질의 (2026-08-24 개편)
+**최초 실행은 지난 3주치를, 그 이후로는 매주 직전 한 주만** 걷습니다
+(`db/weekly_run.py`가 판단). 진행 중인 주(이번 주)는 어느 경우에도 걷지
+않습니다 — 완료된 주만 걷어야 주차별 건수가 항상 온전합니다.
 
-수집원 **17곳**, 넓은 질의 **언어별 2개**, 주 **34크레딧**(월 136, 무료 한도의 14%).
+**GitHub Actions**(`.github/workflows/weekly-collect.yml`)가 매주 월요일
+01:00 UTC(=10:00 KST)에 자동 실행합니다. Actions 탭에서 수동 실행도
+가능합니다. 실패는 종료 코드로 드러나 잡이 빨간불이 됩니다.
 
-| 질의 | 대상 |
-| --- | --- |
-| `AI`, `인공지능` | 한국어 사이트 12곳 |
-| `AI`, `enterprise AI` | 영어 사이트 5곳 |
+### Tavily 크레딧 사용량
 
-**질의는 하나당 1크레딧이다** — 사이트마다 따로 호출한다(한 번에 묶으면 결과가
-큰 사이트로 쏠린다). 결과는 발행일순이 아니라 **Tavily의 관련도(score) 내림차순**
-이고 호출당 최대 20건이다.
+크레딧은 `사이트 수 × 검색어 수`에 비례합니다(질의 하나당 1크레딧). 예:
+사이트 12곳 + 검색어 2개면 주 24크레딧, 무료 티어 월 1,000크레딧 안에서
+넉넉합니다. 결과는 발행일순이 아니라 Tavily 자체 관련도 점수순이고
+호출당 최대 20건입니다.
 
-질의를 이렇게 정한 근거(실측):
-- 한국 사이트에 영문 `AI`만 던지면 손해다 — `인공지능`으로 바꾸니 전자신문
-  2→10건, AI타임스 4→8건. 003이 기록한 "영어 사이트에 한국어 질의" 문제의
-  **반대 방향**인데 아무도 확인한 적이 없었다.
-- 영어는 `AI startup`보다 `enterprise AI`가 낫다 — 같은 기간 TechCrunch에서
-  3건 vs 7건이고, 잡히는 성격도 도입 사례·실적을 함께 커버한다
-  (IBM·OpenAI 제휴, 임직원 지분 매각, 밸류에이션 등).
-- **`AX`는 영어 사이트에 쓰면 안 된다** — TechCrunch에서 20건이 잡히는데 전부
-  Elon Musk의 X, SpaceX, xAI 같은 "X" 매칭이었다. 한국어에서는 통용어지만
-  영어권 대응어는 `AI transformation`이다.
-
-**주의 — Tavily 결과는 호출마다 흔들린다.** 같은 조건으로 두 번 던졌는데
-10건/2건, 4건/0건이 나온 적이 있다. 그래서 "이 매체는 물량이 없다" 같은 판단을
-한 번 던져본 결과로 확정하면 안 되고(지디넷을 그렇게 잘못 배제할 뻔했다),
-질의를 2개 이상 두는 것이 "그 주 그 사이트가 통째로 비는" 사고를 막는
-안전장치가 된다.
-
-### 추가한 수집원 (2026-08-19)
-
-### 수집원 — 교육 매체 4곳 추가 (2026-08-19)
-
-원래 일반 테크 매체 6곳만 보고 있어서 **"교육" 시장의 후보가 거의 안 걷혔다.**
-실측: 수집 기사 152건 중 제목에 교육이 걸린 건 **4건**뿐이라, 라벨을 30건 매기면
-전부 "도움 안 됨"이 나왔다(실제로 그렇게 됐다 — 교육 0:30).
-
-원인을 확인해보니 검색어가 아니라 **창문(수집원)이 문제였다.** 교육 검색어를
-직접 던져도 주당 8건뿐이었고, 6곳 중 교육 매체는 AskedTech 하나(주 1건)였다.
-"교육 기사가 세상에 없는 게 아니라 우리가 보는 곳에 없었다."
-
-후보를 Tavily로 직접 검증한 뒤(3주치, 질의 1개씩) 물량이 나오는 4곳만 넣었다.
-
-| 매체 | 도메인 | 3주치 실측 |
-| --- | --- | --- |
-| Inside Higher Ed | `insidehighered.com` | 20건(호출 상한) |
-| 교육플러스 | `edpl.co.kr` | 8건 |
-| 에듀동아 | `edu.donga.com` | 7건 |
-| EdWeek | `edweek.org` | 6건 |
-
-**뺀 곳**: 에듀인뉴스(`eduinnews.co.kr`)는 Tavily가 **0건** — 색인이 안 됐거나
-크롤링이 막힌 것으로 보여 넣어도 소용이 없다. Times Higher Education은 1건뿐인
-데다 그마저 AI와 무관(대학 입시·비자 중심)이라 뺐다.
-
-`SITE_INCLUDE_PATTERNS`의 경로는 검증 때 실제로 돌아온 URL 형태에 맞췄고,
-목록·저자 페이지는 exclude로 막았다(기사가 아니라 라벨링할 내용이 없다).
-**국내 IT 매체 2곳**(전자신문 `etnews.com`, 블로터 `bloter.net`)도 함께 넣었다.
-한국어 매체가 45%인데 **국내 기업이 언급된 기사는 7%**(152건 중 10건)뿐이었다 —
-AI타임스·ITWorld·GeekNews가 한국어지만 주로 글로벌 AI 소식을 전하는 성격이라
-국내 기업·AX 시장 소식이 비어 있었다. 두 곳 다 검증에서 "플래티어 2분기 AX
-솔루션 매출 89% 증가", "LG CNS, 엔비디아·메타 손잡고 국내 신소재 AX 가속화"
-같은 기사가 실제로 나왔다.
-
-**지디넷코리아**는 `AI` 질의에서 0건이라 한 번 배제했다가, `인공지능`으로 다시
-던지니 2건이 나와 판단을 보류했다 — 질의 하나로 매체를 배제하면 안 된다는
-사례로 남긴다. 에듀인쓰(`eduinnews.co.kr`)는 두 질의 모두 0건이라 제외했다.
-
-### 수집 범위 — 최초 3주치, 그 뒤 매주 직전 주 (2026-08-19)
-
-**같은 명령 하나만 쓰면 된다.** 언제 어디서 실행하든 스스로 판단한다.
-
-| 실행 | 걷는 범위 | 크레딧 |
-| --- | --- | --- |
-| **최초 1회** | **완료된 최근 3주** | 36 |
-| **그 뒤 매주 월요일** | **완료된 직전 주**만 | 12 |
-
-**진행 중인 주는 어느 경우에도 걷지 않는다.** 최초에도 뺀다 — 섞으면
-"8/17 주"라는 같은 이름의 데이터가 이번엔 사흘치, 다음 주엔 7일치가 되어
-주차별 비교가 어긋나고, 라벨의 주차 그룹도 반쪽짜리 주를 하나 더 만든다.
-예) 8/19(수)에 최초 실행하면 7/27\~8/02, 8/03\~8/09, 8/10\~8/16을 걷고,
-8/24(월)에 8/17\~8/23을 이어받는다.
-
-이번 주가 아니라 **직전 주**를 걷는 게 핵심이다. 진행 중인 주를 걷으면
-월·화에 돌렸을 때 이틀치뿐이라 라벨링 후보가 수십 건에 그친다(실측
-2026-08-19: 52건). 월요일에 직전 주를 걷으면 항상 완료된 7일치가 들어온다.
-
-최초 여부는 `pipeline_state` 테이블(008)에 남는다 — `weekly_runs`는 매주
-TRUNCATE되어 늘 "최초"로 보이고, `article_labels`가 비었는지로 대신 보면
-라벨링을 며칠 미룰 때마다 3주치를 다시 긁어 크레딧을 반복해서 쓴다.
-**수집이 실제로 성공했을 때만** 기록하므로, 최초 실행이 실패하면 다음 실행이
-다시 3주치를 시도한다.
-
-최초 3주치는 주차별로 따로 호출한다 — 3주를 한 번에 요청하면 Tavily의
-호출당 20건 상한에 3주치가 눌린다(페이지네이션 없음). 그리고 라벨의 주차
-그룹은 run이 아니라 **기사 발행 주**로 잡히므로(`labeling._label_period_start`),
-3주치가 자연히 여러 주로 갈려 "지난주 라벨로 학습한 모델이 이번 주 기사에
-통하는가"를 바로 측정할 수 있다(`relevance_model.build_groups`가 주차가 둘
-이상이면 주차 단위 평가로 자동 전환).
-
-크레딧: 사이트 6개 × 넓은 질의 2개 = **주 12크레딧**(시장 수와 무관).
-무료 티어 월 1,000 기준 최초 36 + 매주 12 = 월 약 84.
-
-### 매주 자동 실행 (GitHub Actions, 작업 9)
-
-`.github/workflows/weekly-collect.yml`이 **매주 월요일 01:00 UTC(=10:00 KST)** 에
-`pipeline_v2`를 돌린다. 주 1회 몇 분짜리 배치라 서버를 띄워둘 이유가 없다.
-Actions 탭에서 "주간 수집 → Run workflow"로 수동 실행도 된다.
-
-저장소 Settings → Secrets and variables → Actions에 아래를 등록해야 한다.
-
-| 시크릿 | 필수 | 비고 |
-| --- | --- | --- |
-| `DATABASE_URL` | ✅ | 공용 Supabase 주소 |
-| `TAVILY_API_KEY` | ✅ | 없으면 수집이 0건이 되고 잡이 실패한다 |
-| `GEMINI_API_KEY` | ❌ | 2026-08-24부로 이 워크플로우는 안 씀(merge_keywords 단계 제거) — 등록 안 해도 됨 |
-
-**실행 시각이 01:00 UTC인 이유**: 러너 시계는 UTC이고 파이프라인은
-`date.today()`로 주를 계산한다. 한국 시간 기준으로 잡으면(월요일 08:00 KST =
-일요일 23:00 UTC) 러너에서는 아직 일요일이라 직전 주가 한 주 더 과거로 밀린다.
-01:00 UTC면 UTC·KST 양쪽 다 월요일이라 안전하다.
-
-**실패는 종료 코드로 드러난다.** `pipeline_v2`의 `__main__`이 `report["failed"]`가
-비어 있지 않으면 1로 끝나 잡이 빨간불이 된다 — 자동 실행은 로그를 사람이 안
-보므로 종료 코드가 유일한 신호다. 항목 하나라도 `error`면 실패로 세므로
-(`pipeline_report.stage_errors`) RSS 한 곳이 죽어도 알림이 온다.
-
-`[embedding]` extra까지 설치한다. 빼면 임베딩이 후보에서 빠져 TF-IDF만 남는데,
-그게 찍기 기준선을 못 넘으면 그 주는 점수가 아예 없어 화면이 최신순으로 돌아간다
-(실측 2026-08-19: TF-IDF 0.550 < 찍기 0.567). 모델 파일(458MB)은 캐시한다.
-
-동시 실행은 `concurrency`로 막는다 — 파이프라인이 시작할 때 TRUNCATE로 지난주
-데이터를 비우므로 둘이 겹치면 한쪽이 다른 쪽의 수집분을 지운다.
+같은 조건이라도 Tavily 결과는 호출마다 다소 흔들릴 수 있어서, 검색어를
+2개 이상 두는 것을 권합니다 — 한 번의 빈 결과로 "이 사이트는 물량이 없다"고
+판단하지 않기 위한 안전장치입니다.
 
 ### 더 과거까지 걷고 싶을 때 (선택)
 
-최초 3주치는 파이프라인이 알아서 하므로 보통은 필요 없다. 라벨 후보를 더
-늘리고 싶을 때만 쓴다(Tavily만 소급 가능 — RSS·AI타임스 스크래핑은 원리적으로 불가).
+라벨 후보를 늘리고 싶을 때만 씁니다(Tavily로만 소급 가능):
 
 ```bash
 ./.venv/Scripts/python.exe scripts/backfill_past_weeks.py            # 직전 2주 추가
 ./.venv/Scripts/python.exe scripts/backfill_past_weeks.py --weeks 3
 ```
 
-`--weeks N`은 **이번 주를 제외한** 과거 N주다(이번 주는 파이프라인이 담당).
-가장 최근 run에 덧붙으므로 파이프라인을 먼저 돌린 뒤 실행할 것.
+`--weeks N`은 이번 주를 제외한 과거 N주입니다. 가장 최근 run에 덧붙으므로
+파이프라인을 먼저 돌린 뒤 실행하세요. 수집된 기사 자체는 다음 파이프라인
+실행 때 지워지므로, 걷은 주에는 미리 라벨링(👍/👎)을 해두는 게 좋습니다.
 
-라벨은 매주 wipe를 타지 않지만 **수집된 기사 자체는 다음 파이프라인 실행 때
-지워진다** — 걷은 주에 라벨링을 해두는 게 좋다.
+## 관련도 분류기 — 사람이 매긴 좋아요로 학습
 
-개별 단계만 다시 돌리고 싶을 때:
+기사가 "이 팀에 도움되는가"는 LLM이 아니라 **팀이 직접 누른 👍/👎로 학습한
+로컬 분류기**가 판단합니다 — API 호출이 없어 요금제·장애와 무관하게
+항상 동작합니다.
+
+- 문자 n-gram TF-IDF와 다국어 문장 임베딩 두 방식을 같은 조건으로
+  교차검증해 더 나은 쪽을 씁니다(임베딩은 로컬 개발 환경에서만 — 배포
+  환경은 용량 때문에 TF-IDF만 씁니다).
+- 라벨이 5건 쌓일 때마다 자동으로 다시 학습하고 이번 주 순위를 갱신합니다.
+- 정확도는 항상 "무조건 다수 쪽으로 찍었을 때"의 기준선과 함께 표시됩니다.
+- 좋아요는 익명입니다 — 클릭마다 무작위 토큰이 발급되어 개수만 쌓이고
+  누가 눌렀는지는 저장되지 않습니다.
+
+## 개발하기
 
 ```bash
-./.venv/Scripts/python.exe -m tech_monitoring.collectors.search_engine
-./.venv/Scripts/python.exe -m tech_monitoring.analysis.keyword_extraction  # 후보 목록만 확인(저장 안 함)
-./.venv/Scripts/python.exe -m tech_monitoring.analysis.keyword_merge       # Gemini 병합 + market_keywords 저장
-./.venv/Scripts/python.exe -m pytest tests/ -q
+./.venv/Scripts/python.exe -m pytest tests/ -q             # 전체 테스트
+./.venv/Scripts/python.exe -m streamlit run app/streamlit_app.py   # 대시보드 로컬 실행
 ```
 
-### v3(비교 실험)
+### 스키마
+
+마이그레이션은 `db/migrations/`에 001~009로 누적되어 있고 전부
+`IF NOT EXISTS`라 여러 번 적용해도 안전합니다.
+
+| 테이블 | 역할 | 매주 wipe? |
+| --- | --- | --- |
+| `fixed_keywords` | 팀 설정(이름·검색어·수집 사이트) | 아니오 — 설정값 |
+| `weekly_runs` | 주간 배치 실행 메타. 다른 수집 테이블은 이 테이블에 cascade 연결 | 예(wipe 트리거) |
+| `collected_articles` | 이번 주 수집된 기사 풀 | 예 |
+| `article_keyword_relevance` | 기사별 분류기 점수 | 예 |
+| `article_labels` | 사람이 매긴 👍/👎(분류기 학습 데이터). 원본을 스냅샷으로 보존 | **아니오 — 학습 자산** |
+| `pipeline_state` | 최초 부트스트랩(3주치 수집) 완료 여부 | 아니오 — 설정값 |
+| `search_results`, `market_keywords` | 예전 파이프라인의 잔존 테이블(현재 자동 수집 경로는 안 씀) | 예 |
+
+### 프로젝트 구조
+
+```
+app/streamlit_app.py              # 대시보드 화면(레이아웃만, 계산은 dashboard_queries가 담당)
+src/tech_monitoring/
+  collectors/search_engine.py     # Tavily 수집 + 화이트리스트 이중 검증
+  labeling.py                     # 좋아요 저장/조회
+  relevance_model.py              # 라벨로 분류기 학습 + 교차검증 채점
+  dashboard_queries.py            # 대시보드가 쓰는 조회·정렬 로직
+  pipeline_v2.py                  # 주간 파이프라인 오케스트레이터(매주 wipe 담당)
+  mcp_server/                     # Claude용 MCP 서버
+  db/connection.py, db/migrate.py, db/weekly_run.py
+db/migrations/                    # 001~009 누적 마이그레이션
+scripts/manage_fixed_keywords.py  # 팀 설정 CLI(이름·검색어·사이트)
+scripts/backfill_past_weeks.py    # 과거 주차 소급 수집
+scripts/train_relevance_classifier.py  # 라벨 → 분류기 학습 + 성능 출력
+models/                           # 학습된 분류기(.joblib, git 추적 안 함 — 라벨에서 재생성)
+```
+
+## 참고: 이전 세대(v3) 비교 실험
+
+`pipeline_v3`는 검색엔진 기반 수집(v2) 대신 RSS·스크래핑으로 소스를 모으고
+관련도 판단을 LLM에 맡기는 실험적 경로입니다. 현재 자동 수집(GitHub
+Actions)은 v2만 씁니다. v3를 직접 비교해보고 싶다면 `pipeline_v2`를 먼저
+실행한 뒤(v3는 wipe를 하지 않고 v2가 만든 run 위에 얹힙니다):
 
 ```bash
 ./.venv/Scripts/python.exe -m tech_monitoring.pipeline_v3
 ```
-
-**반드시 v2를 먼저 돌린 뒤 실행할 것** — v3는 매주 wipe를 하지 않는다(v2·
-v3 나란히 비교하려고 의도적으로 그렇게 만듦, `pipeline_v3.py` 모듈 docstring
-참고). v2가 이번 주 run을 시작(및 wipe)해두면 v3는 그 위에 올라타기만 한다.
-
-순서: 재선정 사이트 4개 수집(RSS 2 + 스크래핑 2) → 적합성 판단(고정
-키워드별) → 키워드 후보추출 + Gemini 동의어 병합(`pipeline='rss_llm'`로
-저장). 개별 단계:
-
-```bash
-./.venv/Scripts/python.exe -m tech_monitoring.collectors.rss_collector       # Techmeme·TechCrunch
-./.venv/Scripts/python.exe -m tech_monitoring.collectors.geeknews_weekly     # 스크래핑
-./.venv/Scripts/python.exe -m tech_monitoring.collectors.aitimes_scraper    # 스크래핑
-./.venv/Scripts/python.exe -m tech_monitoring.analysis.relevance_filter     # 적합성 판단
-```
-
-## 관련도 판단 — 사람 라벨 기반 분류기 (2026-08-18)
-
-적합성 판단은 원래 Gemini 전담이었는데, **한 번 막히면 그 주 관련 기사가
-통째로 0건**이 되는 구조였다(그게 "결과가 흐지부지된다"의 직접 원인).
-그래서 담당자가 직접 매긴 라벨로 로컬 분류기를 학습해 대체한다 — API 호출이
-0이라 429·크레딧 상태와 무관하다.
-
-```bash
-./.venv/Scripts/python.exe -m streamlit run app/streamlit_app.py   # 🏷️ 라벨링 → 📈 성능 탭
-./.venv/Scripts/python.exe scripts/train_relevance_classifier.py   # CLI로도 같은 채점
-```
-
-1. **라벨링** — 기사 하나씩 "도움이 되는 기사예요 / 도움이 되지 않는 기사예요".
-   라벨 단위는 기사가 아니라 **"기사 × 고정 키워드" 쌍**이다(같은 기사가
-   "교육"엔 도움돼도 "비즈니스 실적"엔 무관할 수 있다 — 실측상 후보 262건 중
-   56개 URL이 여러 키워드에 걸쳐 있다). 카드 아래 "라벨 검토 및 수정"에서 판단을
-   변경하거나 라벨을 취소해 후보로 되돌릴 수 있다(판단이 안 서는 것을 억지로
-   고르면 학습 데이터가 오염된다).
-2. **채점** — 문자 n-gram TF-IDF와 다국어 문장 임베딩 두 방식을 같은 조건으로
-   교차검증해 이긴 쪽을 `models/relevance_classifier.joblib`에 저장한다.
-   fold는 그룹 단위로 나눈다: 라벨이 두 주 이상이면 **주차 단위**로 나눠
-   "다음 주에도 통하는가"를 직접 재고, 한 주뿐이면 같은 기사가 학습·검증에
-   갈리는 누수만 막는다.
-3. **적용** — `relevance_filter.judge_all`이 저장된 모델을 자동으로 집어 쓰고,
-   기사마다 확률을 `article_keyword_relevance.score`에 남긴다(007). 화면은 이
-   점수로 **정렬만** 하고 잘라내지 않는다 — 점수가 낮은 기사도 목록에 남는다
-   (분류기가 틀려서 기사가 사라지는 건 "Gemini가 막히면 그 주 0건"과 같은
-   종류의 사고다). 모델이 없으면 판단을 건너뛰고(`method`가
-   `skipped:모델 없음`) 화면은 최신순 전체를 보여준다 — 라벨이 없는 첫 주에
-   LLM을 부를 이유가 없고, 그 주 결과물은 사람이 라벨링한 것 자체가 된다.
-   Gemini 경로는 `allow_llm_fallback=True`로만 쓴다(비교 실험용).
-   성능 탭에서 모델을 저장하면 그 자리에서 이번 주 기사를 다시 채점해
-   시장 탭 순서가 바로 갱신된다(파이프라인 재실행 불필요).
-
-정확도는 **항상 "찍기 기준선"과 나란히** 본다 — 라벨이 한쪽으로 쏠리면
-"무조건 도움됨"이라고만 답하는 분류기도 정확도가 높게 나와 단독 수치는
-착시다. 화면에도 `+0.000 vs 찍기` 형태로 함께 표시하고, 기준선을 못 넘으면
-모델을 저장하지 않는다.
-
-**라벨은 사람 단위로 남는다**(`labeled_by`, 005). 앱은 각자 띄우고 DB는 공용
-하나를 쓰는 배포가 목표라, 이 값이 없으면 나중에 라벨한 사람이 앞사람 판단을
-조용히 덮어쓴다. `.env`의 `LABELED_BY`로 지정하고(비우면 `local`), 기본 동작은
-**내 라벨만으로 학습·집계**한다 — 팀 전체로 학습하려면
-`fetch_all_labels(conn, labeled_by=ALL_LABELERS)`를 쓴다. 개인 모델과 통합 모델
-중 어느 쪽이 나은지는 라벨이 쌓인 뒤 같은 채점 틀로 비교해서 정한다.
-
-## 대시보드
-
-```bash
-./.venv/Scripts/python.exe -m streamlit run app/streamlit_app.py
-```
-
-직접 검색(라이브 호출, DB 저장 안 함) + 고정 키워드 탭(키워드 선택 시 관련
-기사만 필터 — "이번 주 주요 키워드" 막대그래프는 2026-08-24에 제거).
-계산은 `dashboard_queries.py`가
-전담하고 화면은 레이아웃만 — 데이터가 바뀔 때 손으로 다시 계산할 부분이 없다.
-
-DB 연결 실패(Supabase 무료 티어는 7일 미사용 시 자동 일시정지된다) 시
-10초 내로 원인을 알려주는 에러 메시지를 띄운다(무한 로딩 방지).
-
-## 스키마
-
-마이그레이션은 `db/migrations/`에 001~007로 누적돼 있다(001 v2 · 002 v3 ·
-003 검색어 · 004 라벨 · 005 라벨 주체 · 006 공용 기사 풀 · 007 관련도 점수).
-테이블 7개:
-
-| 테이블 | 역할 | 매주 wipe? |
-| --- | --- | --- |
-| `fixed_keywords` | 사용자가 지정한 고정 키워드(모니터링 대상 시장) | 아니오 — 설정값 |
-| `weekly_runs` | 주간 배치 실행 메타. 다른 수집 테이블은 전부 이 테이블에 cascade 연결 | 예(wipe 트리거) |
-| `search_results` | 시장별 검색어로 수집하던 옛 경로 — 006부터 파이프라인이 쓰지 않는다(정밀도 보강용으로 보존) | 예 |
-| `collected_articles` | **이번 주 공용 기사 풀** — Tavily 넓은 질의(006)와 v3 수집기가 함께 쓴다. 시장과 분리해 기사당 한 행 | 예 |
-| `article_keyword_relevance` | "기사 × 시장" 판단(다대다). `score`에 분류기 확률을 남겨 화면 정렬에 쓴다(007) | 예 |
-| `article_labels` | 사람이 매긴 관련도 라벨(분류기 학습 데이터). `weekly_runs`를 참조하지 않고 원문을 스냅샷으로 복사해 둔다. `labeled_by`로 라벨 주체를 함께 남긴다(005) | **아니오 — 학습 자산** |
-| `market_keywords` | v2/v3 공용 — "이번 주 주요 키워드" 최종 목록. `pipeline` 컬럼(`search_engine`/`rss_llm`)으로 구분. **v2(주간 자동 수집)는 2026-08-24부로 이 테이블을 안 채운다** — `pipeline_v3`(수동 실행)만 계속 채움 | 예 |
-
-`market_keywords.canonical_phrase` + `variant_phrases`(병합된 원본 표기들,
-예: `{"OpenAI","오픈AI","오픈 ai"}`)로 `search_results`(v2) 또는
-`collected_articles`(v3, `article_keyword_relevance`로 관련 있는 것만 필터링)를
-매칭하면 그게 그대로 "이 키워드 관련 주간 기사 목록"이 된다.
-
-## v2 vs v3 비교 실험(2026-08-13 시작)
-
-v2(검색엔진 기반)를 대체하는 게 아니라 **같은 주, 같은 DB에 나란히 돌려서
-비교**하기 위한 실험이다. 몇 주간 recall(놓치는 기사)·정밀도(노이즈)·
-비용/안정성을 실측하고 하나를 접을 계획 — 그때까지 v2·v3 코드·테이블
-둘 다 살아있는 게 정상이다.
-
-**v3 차이점**: 검색엔진은 "고정 키워드 × 사이트"로 쿼리해서 수집 시점에
-이미 어느 고정 키워드에 속하는지 알았지만(`search_results.fixed_keyword_id`
-NOT NULL), v3는 재선정한 사이트 4개를 통째로 먼저 수집하고(`collected_articles`,
-고정 키워드 무관) **관련도 판단을 규칙이 아니라 LLM에게 맡긴다**
-(`article_keyword_relevance`). "카운팅은 코드, 판단은 LLM"이라는 v2의
-원칙은 그대로 유지 — LLM은 관련/무관 판단만 하고 TF-IDF 후보추출·doc_count
-계산은 기존 `analysis/keyword_extraction.py`·`keyword_merge.py`를 그대로
-재사용한다.
-
-**v3 재선정 사이트 4개** (v1의 28개 소스 중 실사용 검증 근거가 있는 것만
-남기고, Hacker News는 "AX 무관 인기글 다수 섞임" 문제 재발 우려로 제외):
-
-| 소스 | 수집 방식 |
-| --- | --- |
-| Techmeme | RSS(`techmeme.com/feed.xml`) |
-| TechCrunch | RSS(`techcrunch.com/feed/`) |
-| GeekNews Weekly | 스크래핑(RSS 없음, v1 스크래퍼 코드 재사용 — `news.hada.io/weekly`) |
-| AI타임스 AI산업/AI기업 | 스크래핑(2026-08-13 확인: RSS 주소가 `cdn.aitimes.com/rss/gn_rss_allArticle.xml`로 이전됐고 섹션 필터도 안 돼 전체기사엔 AX 무관 지역뉴스까지 섞임 — 그래서 `articleList.html?sc_section_code=S1N3`(AI산업)/`sc_sub_section_code=S2N51`(AI기업) 목록 페이지를 직접 파싱) |
-
-## 카운팅은 코드, 의미 판단만 Gemini
-
-`analysis/keyword_merge.py`의 핵심 원칙: Gemini에게 원본 기사나 숫자 계산을
-시키지 않는다. 후보 phrase 목록(이미 코드가 TF-IDF로 정확히 센 것)만 보여
-주고 "동의어끼리 그룹으로 묶어달라"고만 요청한다. 최종 `doc_count`는 코드가
-그룹의 문서 집합을 **합집합**으로 재계산한다(단순 합산 아님 — 한 문서에
-여러 표기가 같이 나올 수 있어서). Gemini 응답은 환각(원본에 없는 phrase)·
-중복 배정을 걸러내는 검증을 거치고, 실패하면 전부 단독 그룹으로 폴백한다.
-
-## 프로젝트 구조
-
-```
-src/tech_monitoring/
-  collectors/search_engine.py     # v2: Tavily 수집 + 화이트리스트 이중 검증(time_range=week)
-  collectors/rss_collector.py     # v3: Techmeme·TechCrunch RSS
-  collectors/geeknews_weekly.py   # v3: GeekNews Weekly 스크래핑(RSS 없음)
-  collectors/aitimes_scraper.py   # v3: AI타임스 AI산업 섹션 스크래핑(RSS 없음)
-  analysis/keyword_extraction.py  # TF-IDF 후보 추출(코드, 정확한 카운팅) — v2/v3 공용
-  analysis/keyword_merge.py       # Gemini 동의어 병합 + market_keywords 확정 — v2/v3 공용
-  analysis/relevance_filter.py    # v3: 기사-고정키워드 적합성 판단(분류기 우선, Gemini 폴백)
-  labeling.py                     # 사람 라벨 저장/조회(라벨링 화면 ↔ article_labels)
-  relevance_model.py              # 라벨로 분류기 학습 + 교차검증 채점(계산 전담)
-  pipeline_report.py              # 단계 결과의 항목별 error를 실패로 집계(조용한 실패 차단)
-  llm_client.py                   # Gemini 호출 공용 wrapper(keyword_merge·relevance_filter 공유)
-  utils/keyword_text.py           # 구(phrase)+TF-IDF 로직(v1에서 이관, 실사용 검증 완료)
-  db/connection.py, db/migrate.py, db/weekly_run.py
-  pipeline_v2.py                  # v2 오케스트레이터(매주 wipe 담당)
-  pipeline_v3.py                  # v3 오케스트레이터(wipe 안 함 — v2 이후 실행)
-db/migrations/          # v2(001) + v3(002) + 검색어(003) + 라벨(004)
-                        # + 라벨 주체(005) + 공용 기사 풀(006) + 관련도 점수(007)
-db/migrations_v1_archive/  # v1 스키마(참고용, 더 이상 적용 안 됨)
-scripts/manage_fixed_keywords.py
-scripts/train_relevance_classifier.py   # 라벨 → 분류기 학습 + 성능 출력
-models/                 # 학습된 분류기(.joblib, git 추적 안 함 — 라벨에서 재생성)
-```
-
-## 진행 현황
-
-- v2: 수집(검색엔진) → 후보추출(TF-IDF) → 병합(Gemini) → 오케스트레이터까지 완료,
-  실제 Tavily 연동 검증 완료(2026-08-13).
-- v3: 수집(RSS 2 + 스크래핑 2) → 적합성 판단 → 후보추출·병합 재사용 →
-  오케스트레이터까지 완료, 실제 사이트 연동 검증 완료(2026-08-13, 4개 소스
-  전부 수집 성공).
-- **조용한 실패 차단(2026-08-18)**: 각 단계는 개별 항목이 실패해도 예외 대신
-  결과의 `error` 필드로만 알리는 관례라, 예외만 보던 오케스트레이터가 Gemini
-  전면 실패·`TAVILY_API_KEY` 미설정 같은 상황을 `ok`로 넘기고 run을
-  `completed`로 마감하고 있었다. `pipeline_report.stage_errors`로 항목별
-  error를 실패로 집계하고, 대시보드 상단에도 실패 배너를 띄운다.
-- **관련도 분류기(2026-08-18)**: 라벨 테이블·라벨링 화면·학습/채점(교차검증,
-  찍기 기준선 비교, Precision@K·NDCG@K)·파이프라인 연결까지 코드 완료.
-  라벨 수집은 진행 전이라 실측 성능은 아직 없다(라벨 30건부터 측정 가능).
-- v1 코드(수집기·필터 5단계·MCP 서버·대시보드 데이터 스크립트) 정리 완료.
-- Streamlit 대시보드(고정 키워드 탭 + 주요 키워드 랭킹 + 키워드별 주간 기사
-  목록 + 직접 검색창)까지 완료 — 다만 v2 전용(v3의 `pipeline='rss_llm'` 결과는
-  아직 화면에 안 붙임).
-- **다음**: (1) 라벨 수집(대시보드 🏷️ 라벨링 탭 — 현재 후보 262건) 후
-  📈 성능 탭에서 실측, (2) v2 vs v3 비교를 대시보드에서 보여주는 화면,
-  (3) Claude 연결용 MCP는 v2/v3 스키마 기준으로 아직 재구축 전(당분간 공백).
-
-> ⚠️ `pipeline_v2`는 시작할 때 지난주 데이터를 통째로 지운다(`TRUNCATE
-> weekly_runs CASCADE`). **라벨링할 후보가 남아 있으면 파이프라인을 돌리기
-> 전에 라벨링을 끝내야 한다** — 라벨 자체는 스냅샷이라 안전하지만, 아직
-> 라벨 안 한 기사는 사라진다.
