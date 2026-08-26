@@ -284,6 +284,12 @@ CLI로도 여전히 관리할 수 있다(화면에 없는 세부 조정, 예: `r
 포크해서 자기 몫의 Supabase·Tavily 무료 티어로 따로 배포하면 된다 — 오히려
 이쪽이 무료 한도를 팀마다 새로 받는 셈이라 더 낫다.
 
+**Claude Code한테 통째로 맡길 수는 없다** — 계정 생성(Supabase·Tavily)과
+발급받은 키를 GitHub/Streamlit Cloud Secrets에 입력하는 건 AI 에이전트가
+대신 할 수 없는 영역이다(자격증명 관련 행동 정책). 아래 1~3번(계정 만들고
+키 발급)만 사람이 직접 하고, 그다음(포크한 코드 손보기·마이그레이션·
+부트스트랩 실행)은 Claude Code에 시켜도 된다.
+
 1. **저장소 포크** — GitHub에서 Fork.
 2. **자기 Supabase 프로젝트 생성**(무료 티어) → `DATABASE_URL` 확보.
 3. **자기 Tavily API 키 발급**([tavily.com](https://tavily.com), 무료 티어,
