@@ -29,27 +29,43 @@
 
 ## 빠른 시작 — 우리 팀 배포 만들기
 
-1. 이 저장소를 [Fork](https://github.com/GeeYun086/tech-monitoring-mcp/fork)합니다.
-2. [Supabase](https://supabase.com)에서 무료 프로젝트를 만들고 `DATABASE_URL`을 받습니다.
+**git이나 코드를 몰라도 아래 순서만 그대로 따라가면 됩니다** — 로컬에
+아무것도 설치할 필요 없이, 전부 웹 화면에서 끝납니다. 계정 생성과 발급받은
+키를 GitHub/Streamlit Secrets에 입력하는 것만 사람이 직접 해야 하고(AI
+에이전트가 대신할 수 없는 영역입니다), 그 외 코드 작업(포크 손보기, 새
+사이트 추가 등)은 Claude Code에 맡겨도 됩니다.
+
+0. **GitHub 계정을 준비합니다.** 이미 있으면 그대로 쓰고, 팀 전용 계정을
+   새로 만들어도 됩니다.
+1. 이 저장소를 [Fork](https://github.com/GeeYun086/tech-monitoring-mcp/fork)합니다
+   (우측 상단 Fork 버튼 — 방금 준비한 계정으로 로그인한 상태여야 합니다).
+2. [Supabase](https://supabase.com)에서 무료 프로젝트를 만들고 `DATABASE_URL`을 받습니다
+   (Connect 화면이 골라주는 연결 문자열을 포트 상관없이 그대로 쓰면 됩니다 —
+   이 프로젝트는 6543번 트랜잭션 풀러·5432번 세션 풀러 둘 다 안전하게
+   지원합니다).
 3. [Tavily](https://tavily.com)에서 무료 API 키를 발급받습니다(카드 등록 불필요).
-4. 포크한 저장소를 [Streamlit Community Cloud](https://streamlit.io/cloud)에 배포하고,
-   Secrets에 `DATABASE_URL`·`TAVILY_API_KEY`를 등록합니다.
+4. 포크한 저장소를 [Streamlit Community Cloud](https://streamlit.io/cloud)에 배포합니다
+   (Main file path는 `app/streamlit_app.py`). 배포 화면의 Secrets에
+   `DATABASE_URL`·`TAVILY_API_KEY`를 등록합니다. **DB 테이블은 앱이 처음
+   뜰 때 자동으로 만들어지므로 따로 준비할 것이 없습니다.**
 5. 배포된 링크를 열면 **"처음 오셨네요 — 팀을 설정해주세요"** 화면이 뜹니다.
    팀 이름, 검색어(한국어/영어), 수집할 사이트를 입력하고 "시작하기"를
-   누르면 그 자리에서 첫 수집까지 끝납니다.
-6. 저장소 Settings → Actions에서 GitHub Actions를 켜고, 같은 두 값을
-   Secrets에 등록하면 이후 매주 월요일 자동으로 새 기사를 수집합니다.
+   누르면 그 자리에서 첫 수집까지 끝납니다(사이트·검색어 수에 따라 몇 분
+   걸릴 수 있습니다).
+6. 저장소 Settings → Actions에서 GitHub Actions를 켭니다(포크 저장소는
+   기본적으로 꺼져 있습니다 — GitHub 보안 기본값). Settings → Secrets and
+   variables → Actions에 같은 두 값을 등록하면 이후 매주 월요일 자동으로
+   새 기사를 수집합니다.
 7. 배포 링크를 팀원에게 공유하세요. 접속한 사람은 전부 같은 기사·좋아요를
    보고, 좋아요는 이 팀 안에서만 쌓여 학습됩니다.
 
-계정 생성과 발급받은 키를 GitHub/Streamlit Secrets에 입력하는 것은 사람이
-직접 해야 합니다(AI 에이전트가 대신할 수 없는 영역입니다) — 그 외 코드
-작업(포크 손보기, 새 사이트 추가 등)은 Claude Code에 맡겨도 됩니다.
-자세한 단계별 설명은 [배포 가이드](#배포-가이드)를 참고하세요.
+로컬 PC에서 코드를 직접 손보고 싶다면(예: 새 수집 사이트 추가, 버그 수정)
+[로컬 개발 환경 준비](#로컬-개발-환경-준비)를 참고하세요 — 위 순서와는
+별개로, 선택 사항입니다.
 
 ## 대시보드 사용법
 
-배포된 링크를 열면 두 개의 탭이 있습니다.
+배포된 링크를 열면 세 개의 탭이 있습니다.
 
 - **`<팀 이름>` 탭(기본 화면)** — 이번 주 수집된 기사 전체를 보여줍니다.
   국내 매체 우선, 그다음 좋아요 많은 순, 그다음 분류기 점수순으로
@@ -60,6 +76,10 @@
 - **📈 성능 탭** — 지금까지 쌓인 좋아요/싫어요로 분류기를 채점합니다.
   정확도는 항상 "무조건 다수 쪽으로 찍었을 때"의 기준선과 함께 표시되어
   착시 없이 볼 수 있습니다.
+- **⚙️ 설정 탭** — 검색어·수집 사이트를 CLI 없이 화면에서 바로 조회·변경합니다.
+  저장한 값은 다음 자동 수집(매주 월요일)부터 반영되고, 이번 주 이미
+  수집된 기사는 그대로 유지됩니다. 팀 이름 자체를 바꾸려면 아래
+  [팀 설정 나중에 바꾸기](#팀-설정-나중에-바꾸기)의 CLI를 씁니다.
 
 ## 아키텍처 한눈에 보기
 
@@ -82,50 +102,34 @@ collected_articles (이번 주 기사 풀)
 
 ## 배포 가이드
 
-### 새 팀으로 독립 배포하기
+표준 배포 순서는 위 ["빠른 시작"](#빠른-시작--우리-팀-배포-만들기)이 전부입니다
+(git을 몰라도 그대로 따라가면 됩니다). 아래는 **로컬 PC에서 직접 코드를
+손보거나 디버깅하고 싶을 때만** 필요한 내용입니다 — 새 배포를 만들 때도,
+이미 있는 팀 DB에 개발자로 합류할 때도 같은 방법을 씁니다.
 
-"빠른 시작"의 자세한 버전입니다.
-
-1. **저장소 포크** — GitHub에서 Fork.
-2. **Supabase 프로젝트 생성**(무료 티어) → `DATABASE_URL` 확보.
-3. **Tavily API 키 발급**([tavily.com](https://tavily.com), 무료 티어, 카드 등록 불필요).
-4. 포크한 저장소를 로컬에 클론해 `.env`에 위 두 값을 넣고 스키마를 적용합니다:
-   ```bash
-   cp .env.example .env   # DATABASE_URL, TAVILY_API_KEY 채우기
-   ./.venv/Scripts/python.exe -m tech_monitoring.db.migrate
-   ```
-5. **GitHub Actions 활성화** — 포크 저장소는 Actions가 기본적으로 꺼져
-   있습니다(GitHub 보안 기본값). 저장소의 Actions 탭에서 켠 뒤, Settings →
-   Secrets and variables → Actions에 `DATABASE_URL`·`TAVILY_API_KEY`를
-   등록하면 `weekly-collect.yml`이 매주 월요일 자동으로 돕니다.
-6. **Streamlit Cloud에 배포** — 포크 저장소를 연결하고 Main file path를
-   `app/streamlit_app.py`로, Secrets에 `DATABASE_URL`·`TAVILY_API_KEY`를
-   등록합니다. (`TAVILY_API_KEY`는 다음 단계의 첫 수집에 쓰입니다 — 평소
-   화면 자체는 Tavily를 호출하지 않습니다.)
-7. **배포 링크를 열어 팀 설정** — "처음 오셨네요" 화면에서 팀 이름·검색어·
-   사이트를 입력하고 "시작하기"를 누르면 등록과 동시에 첫 수집이 돕니다
-   (사이트·검색어 수에 따라 몇 분 걸릴 수 있습니다). 이 화면은 한 번만
-   나타나고, 이후로는 이 팀의 기사 목록이 기본 화면이 됩니다.
-8. 배포 링크를 팀원에게 공유합니다.
-
-### 기존 배포에 로컬 개발 환경 붙이기
-
-이미 있는 팀 DB(예: goormEDU 전략기획팀 배포)에 로컬 PC로 붙어서
-개발·디버깅하려면:
+### 로컬 개발 환경 준비
 
 ```bash
 py -3.12 -m venv .venv
-./.venv/Scripts/python.exe -m pip install -e .
-cp .env.example .env   # 담당자에게 받은 DATABASE_URL로 채우기
-./.venv/Scripts/python.exe -m tech_monitoring.db.migrate   # 이미 최신이면 전부 건너뜀
+./.venv/Scripts/python.exe -m pip install -e ".[dev]"
+cp .env.example .env   # DATABASE_URL·TAVILY_API_KEY 채우기 — 새로 만든
+                        # Supabase 프로젝트라면 거기서 받은 값, 이미 있는
+                        # 팀 DB(예: goormEDU 전략기획팀 배포)에 합류한다면
+                        # 담당자에게 받은 값
+./.venv/Scripts/python.exe -m tech_monitoring.db.migrate   # 이미 최신이면 전부 건너뜀 —
+                                                             # 대시보드 화면도 뜰 때 자동으로
+                                                             # 실행하지만, 화면보다 먼저
+                                                             # 파이프라인·스크립트를 돌릴
+                                                             # 계획이면 미리 한 번 해두면 안전
 ./.venv/Scripts/python.exe -m pytest tests/ -q              # 세팅 확인
 ```
 
-**절대 `.env.example`의 `localhost` 기본값을 그대로 두지 마세요.** 그러면
-로컬에만 존재하는 빈 DB를 보게 되어, 기사를 새로 수집하느라 Tavily
-크레딧을 낭비하고 라벨(팀의 판단 자산)이 갈라집니다. 항상 팀이 쓰는
-Supabase 주소를 넣으세요 — DB는 이미 클라우드에 있으므로 별도로 띄울 것이
-없습니다. `docker-compose.yml`의 Postgres는 순수 로컬 실험 전용입니다.
+**기존 팀 DB에 합류하는 경우, 절대 `.env.example`의 `localhost` 기본값을
+그대로 두지 마세요.** 그러면 로컬에만 존재하는 빈 DB를 보게 되어, 기사를
+새로 수집하느라 Tavily 크레딧을 낭비하고 라벨(팀의 판단 자산)이 갈라집니다.
+항상 팀이 쓰는 Supabase 주소를 넣으세요 — DB는 이미 클라우드에 있으므로
+별도로 띄울 것이 없습니다. `docker-compose.yml`의 Postgres는 순수 로컬
+실험 전용입니다.
 
 ### 설정값(Secrets) 참고
 
