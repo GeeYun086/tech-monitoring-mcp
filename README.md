@@ -27,6 +27,18 @@
   독립된 검색어·기사·좋아요·학습 데이터를 갖습니다. 한 팀의 배포 링크에
   접속한 사람들끼리만 데이터를 공유합니다.
 
+## 역할별 할 일 한눈에 보기
+
+**딱 한 명(관리자)만 저장소를 다루고 계정·키를 발급하면 됩니다.** 나머지
+팀원은 레포도, Python도, 계정 발급도 필요 없습니다.
+
+| | 관리자(1명) | 팀원(나머지 전원) |
+| --- | --- | --- |
+| 레포 클론 | 불필요(웹 화면만으로 배포 가능) | 불필요 |
+| 계정 발급 | GitHub·Supabase·Tavily 각 1개 | 불필요 |
+| 하는 일 | fork → 배포 → 팀 설정 → Actions 켜기 ([빠른 시작](#빠른-시작--우리-팀-배포-만들기)) | 배포 링크 접속해서 기사 읽고 👍/👎 ([대시보드 사용법](#대시보드-사용법)) |
+| MCP 쓰려면 | 워크플로 켜기 + `DATABASE_URL` 공유([관리자가 한 번만 해둘 일](#관리자가-한-번만-해둘-일)) | Docker 설치 + 설정 등록([팀원이 쓰는 법](#팀원이-쓰는-법-레포-클론-불필요)) |
+
 ## 빠른 시작 — 우리 팀 배포 만들기
 
 **git이나 코드를 몰라도 아래 순서만 그대로 따라가면 됩니다** — 로컬에
@@ -141,13 +153,12 @@ cp .env.example .env   # DATABASE_URL·TAVILY_API_KEY 채우기 — 새로 만�
 
 ## MCP 서버 — Claude가 수집 결과를 직접 조회
 
-```bash
-./.venv/Scripts/python.exe -m tech_monitoring.mcp_server
-```
-
-읽기 전용입니다 — 수집·학습은 파이프라인과 대시보드가 하고, MCP 서버는
-이미 DB에 있는 결과를 꺼내 보여주기만 합니다. 그래서 머신러닝 라이브러리가
-필요 없습니다(psycopg만 있으면 됩니다).
+Claude가 이번 주 기사·인기 기사를 직접 조회해 주간 보고서나 인사이트를 쓸
+수 있게 해주는 창구입니다. **읽기 전용**입니다 — 수집·학습은 파이프라인과
+대시보드가 이미 끝내두고, MCP 서버는 DB에 있는 결과를 꺼내 보여주기만
+합니다. 그래서 머신러닝 라이브러리가 필요 없고(psycopg만 있으면 됩니다),
+**레포를 클론하지 않아도** Docker 이미지 하나로 팀원 각자 바로 쓸 수
+있습니다.
 
 | 도구 | 하는 일 |
 | --- | --- |
@@ -160,33 +171,62 @@ cp .env.example .env   # DATABASE_URL·TAVILY_API_KEY 채우기 — 새로 만�
 응답에는 정렬 근거(`ordering`)와 전체 건수(`total`)가 함께 담겨, 잘린
 결과나 임시 정렬을 추천 순위로 오해하지 않게 합니다.
 
-### 도커로 배포하기 (남에게 줄 때)
+### 관리자가 한 번만 해둘 일
 
-저장소를 클론할 필요 없이 `docker run` 한 줄이면 됩니다. `main`에 소스가
-바뀔 때마다 GitHub Actions가 자동으로 이미지를 구워 GHCR에 올려둡니다.
+배포를 만든 사람만 하면 되고, 팀원은 몰라도 됩니다.
+
+1. 저장소 **Settings → Actions**에서 `publish-mcp-image` 워크플로를 켭니다
+   (fork는 Actions가 기본적으로 꺼져 있습니다 — `weekly-collect`와 같은
+   이유). 켜두면 `main`에 push할 때마다 GitHub Actions가 자동으로 MCP용
+   이미지를 구워 GHCR(`ghcr.io/<GitHub 계정>/tech-monitoring-mcp`)에
+   올려둡니다. 지금 바로 만들고 싶다면 Actions 탭에서 이 워크플로를 선택해
+   **Run workflow**로 수동 실행해도 됩니다.
+2. (권장) GitHub 저장소의 **Packages** 탭에서 이 이미지를 **Public**으로
+   바꿔둡니다. 이미지 자체엔 `DATABASE_URL` 같은 비밀값이 하나도 안
+   들어있고(실행할 때 `-e`로 넘기는 값이라 이미지엔 코드만 담김) 그냥
+   코드일 뿐이라, Public으로 두면 팀원들이 로그인 없이 바로 받을 수
+   있습니다. Private로 두면 아래 "이미지가 비공개라면" 단계가 팀원마다
+   필요해 번거롭습니다.
+3. 팀원에게 **`DATABASE_URL`**(Supabase 연결 문자열)과 아래 "팀원이 쓰는
+   법"을 공유합니다.
+
+### 팀원이 쓰는 법 (레포 클론 불필요)
+
+1. [Docker](https://www.docker.com/products/docker-desktop/)를 설치합니다.
+2. 관리자에게 받은 `DATABASE_URL`을 아래처럼 자신의 Claude
+   Desktop/Code MCP 설정에 등록합니다(Claude Code라면
+   `.mcp.json`이나 `claude mcp add`로):
+
+   ```json
+   {
+     "mcpServers": {
+       "tech-monitoring": {
+         "command": "docker",
+         "args": ["run", "--rm", "-i",
+                  "-e", "DATABASE_URL=postgresql://...",
+                  "ghcr.io/<GitHub 계정>/tech-monitoring-mcp:latest"]
+       }
+     }
+   }
+   ```
+
+   `<GitHub 계정>`은 관리자가 fork한 저장소의 계정 이름입니다(예:
+   `gygoormie`). Docker가 처음 실행될 때 이미지를 자동으로 pull합니다.
+3. **이미지가 비공개라면**(관리자가 Public으로 안 바꿨다면), 최초 1회만
+   로그인이 필요합니다: 자신의 GitHub 개인 액세스 토큰(`read:packages`
+   권한)을 발급받아 `echo <토큰> | docker login ghcr.io -u <자기 GitHub
+   아이디> --password-stdin`.
+
+이게 전부입니다 — Python도, 레포 클론도, `.env`도 필요 없습니다.
+
+### 로컬 개발 환경에 이미 클론했다면
+
+[로컬 개발 환경 준비](#로컬-개발-환경-준비)를 이미 마쳤다면 Docker 없이도
+바로 씁니다:
 
 ```bash
-docker pull ghcr.io/geeyun086/tech-monitoring-mcp:latest
+./.venv/Scripts/python.exe -m tech_monitoring.mcp_server
 ```
-
-```json
-{
-  "mcpServers": {
-    "tech-monitoring": {
-      "command": "docker",
-      "args": ["run", "--rm", "-i",
-               "-e", "DATABASE_URL=postgresql://...",
-               "ghcr.io/geeyun086/tech-monitoring-mcp:latest"]
-    }
-  }
-}
-```
-
-이 저장소가 비공개라 이미지도 비공개입니다. 접근 권한이 있다면 pull 전에
-한 번 로그인하세요: `echo <개인 액세스 토큰(read:packages)> | docker login ghcr.io -u <GitHub 아이디> --password-stdin`
-
-이미지는 머신러닝 라이브러리 없이 psycopg + mcp만 담아 가볍습니다(약
-274MB). 로컬에서 직접 빌드하려면 `docker build -t tech-monitoring-mcp .`
 
 Claude Code에서는 저장소 루트의 `.mcp.json`으로 자동 연결됩니다. 다른
 클라이언트(Claude Desktop 등)는 아래처럼 등록합니다:
@@ -201,6 +241,9 @@ Claude Code에서는 저장소 루트의 `.mcp.json`으로 자동 연결됩니�
   }
 }
 ```
+
+로컬에서 이미지를 직접 빌드하려면 `docker build -t tech-monitoring-mcp .`
+(약 274MB — 머신러닝 라이브러리 없이 psycopg + mcp만 담겨 가볍습니다).
 
 ## 팀 설정 나중에 바꾸기
 
