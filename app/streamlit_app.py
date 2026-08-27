@@ -539,9 +539,9 @@ def _render_first_run_setup(conn) -> None:
     제출하면 팀을 등록하고 **그 자리에서 곧바로 첫 수집까지 돌린다**
     (pipeline_v2.run_pipeline을 그대로 재사용 — 매주 자동 수집(GitHub
     Actions)과 완전히 같은 경로를 타서 "수동 첫 실행"과 "자동 주간 수집"이
-    다른 코드로 갈라지지 않는다). 최초 실행은 3주치를 한 번에 걷는
-    부트스트랩이라(db/weekly_run.target_weeks) 사이트·검색어 수에 따라
-    몇 분 걸릴 수 있다."""
+    다른 코드로 갈라지지 않는다). 최초 실행도 직전 완료된 1주만 걷는다
+    (2026-08-27부로 3주 부트스트랩 없앰 — db/weekly_run.BOOTSTRAP_WEEKS
+    참고). 그래도 사이트·검색어 수에 따라 몇 분 걸릴 수 있다."""
     from tech_monitoring.collectors.search_engine import KOREAN_DOMAINS, SITE_DOMAINS, SITE_NAMES
 
     st.subheader("처음 오셨네요 — 팀을 설정해주세요")
@@ -607,6 +607,63 @@ def _render_first_run_setup(conn) -> None:
             st.rerun()
 
 
+def _render_settings_tab(conn, fixed_keyword: dict) -> None:
+    """검색어·수집 사이트 조회·변경 화면(2026-08-27 추가). 예전엔
+    scripts/manage_fixed_keywords.py CLI로만 가능했는데, 담당자가 CLI 없이
+    화면에서 직접 확인·조정하고 싶어해서 추가했다.
+
+    여기서 저장한 값은 fixed_keywords에 바로 반영되고, **다음 자동 수집
+    (매주 월요일 GitHub Actions, 또는 다음 수동 파이프라인 실행)부터
+    적용된다** — pipeline_v2가 실행되는 그 시점의 DB 값을 그대로 읽어
+    쓰기 때문에(collectors/search_engine.py), 코드 재배포가 필요 없다.
+    이번 주 이미 수집된 기사·라벨은 건드리지 않는다(fixed_keywords는 매주
+    wipe 대상이 아닌 설정값 테이블 — README "스키마" 표 참고).
+    팀 이름 자체(keyword 컬럼)는 라벨·분류기 점수와 연결된 식별자라 여기서는
+    안 바꾼다 — 이름 변경은 지금처럼 scripts/manage_fixed_keywords.py rename
+    으로만 한다."""
+    from tech_monitoring.collectors.search_engine import SITE_DOMAINS, SITE_NAMES
+
+    st.subheader("⚙️ 설정")
+    st.caption(
+        f"'{fixed_keyword['keyword']}' 팀의 검색어·수집 사이트입니다. "
+        "여기서 바꾼 값은 **다음 자동 수집(매주 월요일)부터** 반영되고, "
+        "이번 주 이미 수집된 기사는 그대로 유지됩니다."
+    )
+
+    ko_current = ", ".join(fixed_keyword.get("search_terms_ko") or [])
+    en_current = ", ".join(fixed_keyword.get("search_terms_en") or [])
+    sites_current = fixed_keyword.get("site_domains") or []
+
+    ko_terms = st.text_input(
+        "한국어 검색어(쉼표로 구분)", value=ko_current, key="settings_ko",
+        help="비워두면 넓은 질의(\"AI\"/\"인공지능\")로 폴백합니다.",
+    )
+    en_terms = st.text_input(
+        "영어 검색어(쉼표로 구분)", value=en_current, key="settings_en",
+        help="비워두면 넓은 질의(\"AI\")로 폴백합니다.",
+    )
+    site_options = {d: SITE_NAMES.get(d, d) for d in SITE_DOMAINS}
+    selected_sites = st.multiselect(
+        "수집할 사이트(비우면 전체 화이트리스트)",
+        options=list(site_options.keys()),
+        format_func=lambda d: site_options[d],
+        default=[d for d in sites_current if d in site_options],
+        key="settings_sites",
+    )
+
+    if st.button("저장", type="primary"):
+        ko_list = [t.strip() for t in ko_terms.split(",") if t.strip()]
+        en_list = [t.strip() for t in en_terms.split(",") if t.strip()]
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE fixed_keywords SET search_terms_ko = %s, search_terms_en = %s, "
+                "site_domains = %s WHERE keyword = %s",
+                (ko_list, en_list, selected_sites or None, fixed_keyword["keyword"]),
+            )
+        st.success("저장했습니다. 다음 자동 수집(매주 월요일)부터 반영됩니다.")
+        st.rerun()
+
+
 def main() -> None:
     st.title("기사 모니터링")
 
@@ -637,13 +694,17 @@ def main() -> None:
     # 보조 지표라 뒤로. "한 배포 = 팀 하나"(2026-08-25)로 fixed_keywords는
     # 보통 1개뿐이라 사실상 "<팀 이름>"/"📈 성능" 두 탭만 남는다 — 화면에서
     # 팀을 더 추가하는 기능은 없다(README "다른 팀이 독립적으로 배포하기").
-    options = [kw["keyword"] for kw in fixed_keywords] + ["📈 성능"]
+    options = [kw["keyword"] for kw in fixed_keywords] + ["📈 성능", "⚙️ 설정"]
     selected = st.segmented_control("보기", options, default=options[0], label_visibility="collapsed")
     if not selected:          # single-select라 같은 항목을 다시 누르면 선택 해제된다
         selected = options[0]
 
     if selected == "📈 성능":
         _render_performance_tab(conn)
+    elif selected == "⚙️ 설정":
+        # "한 배포 = 팀 하나"라 fixed_keywords[0]이 곧 이 배포의 팀이다
+        # (_render_settings_tab 함수 docstring 참고).
+        _render_settings_tab(conn, fixed_keywords[0])
     else:
         kw = next(k for k in fixed_keywords if k["keyword"] == selected)
         _render_keyword_tab(conn, run["id"], kw, period_start)
