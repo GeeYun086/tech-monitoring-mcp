@@ -88,7 +88,7 @@ def _conn():
     # 스택트레이스가 그대로 노출된다(DATABASE_URL·Supabase 일시정지 등
     # 운영 중 흔한 원인을 담당자가 바로 알아볼 수 있는 메시지가 더 낫다).
     try:
-        return get_connection()
+        conn = get_connection()
     except psycopg.OperationalError as exc:
         st.error(
             "DB에 연결할 수 없습니다. `.env`의 DATABASE_URL을 확인하거나, "
@@ -96,6 +96,22 @@ def _conn():
             f"확인하세요.\n\n오류: {exc}"
         )
         st.stop()
+
+    # 2026-08-27 추가 — "빠른 시작"이 로컬 클론·db/migrate 실행을 요구하지
+    # 않는데도(Streamlit Cloud에 바로 배포) 스키마 생성 단계가 어디서도 자동
+    # 실행되지 않아, 배포 직후 fixed_keywords 등 테이블이 없어 화면이 그대로
+    # 죽는 문제를 실사용 중 확인했다. 마이그레이션은 IF NOT EXISTS +
+    # schema_migrations 추적이라 멱등하므로, 앱이 뜰 때마다(딱 한 번,
+    # cache_resource라 프로세스당 1회) 조용히 최신 상태로 맞춰둔다 — 로컬
+    # 개발자가 별도로 db.migrate를 돌리지 않아도 항상 안전하다.
+    try:
+        from tech_monitoring.db.migrate import run_migrations
+        run_migrations()
+    except Exception as exc:
+        st.error(f"DB 스키마 준비 중 오류가 났습니다: {exc}")
+        st.stop()
+
+    return conn
 
 
 def _live_conn():
