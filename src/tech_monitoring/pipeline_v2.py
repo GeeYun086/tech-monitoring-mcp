@@ -121,7 +121,7 @@ def run_pipeline() -> dict:
     run_id, plan = _start_run()
     logger.info(
         "수집 대상 %s: %s",
-        "3주치(최초 1회)" if plan["bootstrap"] else "직전 주",
+        "최초 1회" if plan["bootstrap"] else "직전 주",
         ", ".join(f"{s}~{e}" for s, e in plan["weeks"]),
     )
 
@@ -153,10 +153,10 @@ def run_pipeline() -> dict:
             logger.info("%s ok (%.1fs): %s", name, time.monotonic() - started, result)
 
     # 최초 수집을 마쳤다고 표시하는 건 **실제로 성공했을 때만** — 실패했는데
-    # 표시하면 다음부터 직전 주만 걷어 3주치를 영영 못 채운다.
+    # 표시하면 실패한 그 주를 못 걷고 다음 직전 주로 건너뛰게 된다.
     if plan["bootstrap"] and "collect" not in failed:
         _mark_bootstrapped()
-        logger.info("최초 3주치 수집 완료 — 다음부터는 직전 주만 걷습니다.")
+        logger.info("최초 수집 완료 — 다음부터도 직전 주만 걷습니다.")
 
     _finish_run(run_id, failed)
 

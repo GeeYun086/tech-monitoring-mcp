@@ -140,7 +140,8 @@ def test_week_bounds_for_is_stable_within_the_same_week():
     assert wr.week_bounds_for(date(2026, 8, 17)) == wr.week_bounds_for(date(2026, 8, 23))
 
 
-# ---- 수집 주기: 최초 3주치 → 이후 직전 주만 (2026-08-19 담당자 결정) ----
+# ---- 수집 주기: 최초든 이후든 직전 완료 주 1개만 (2026-08-19 담당자 결정,
+#      2026-08-27 최초 3주 부트스트랩 폐지로 최초=평상시 통일) ----
 
 def test_previous_week_bounds_returns_the_completed_week():
     """월요일에 돌리면 방금 끝난 주를 걷어야 한다 — 진행 중인 주를 걷으면
@@ -154,15 +155,14 @@ def test_previous_week_is_stable_regardless_of_weekday_run():
     assert wr.previous_week_bounds(date(2026, 8, 26)) == wr.previous_week_bounds(date(2026, 8, 24))
 
 
-def test_bootstrap_collects_three_completed_weeks_not_the_current_one():
+def test_bootstrap_collects_one_completed_week_not_the_current_one():
     """진행 중인 주는 최초 수집에서도 뺀다 — 섞으면 "8/17 주"가 이번엔 사흘치,
     다음 주엔 7일치가 되어 주차별 비교가 어긋난다(2026-08-19 담당자 확인).
-    8/19(수)에 돌리면 8/17~ 은 아직 진행 중이므로 그 이전 3주를 걷는다."""
+    8/19(수)에 돌리면 8/17~ 은 아직 진행 중이므로 그 이전 완료된 1주만 걷는다
+    (2026-08-27부로 최초도 평상시와 같은 폭 — BOOTSTRAP_WEEKS 참고)."""
     weeks = wr.target_weeks(bootstrap=True, today=date(2026, 8, 19))
 
     assert weeks == [
-        (date(2026, 7, 27), date(2026, 8, 2)),
-        (date(2026, 8, 3), date(2026, 8, 9)),
         (date(2026, 8, 10), date(2026, 8, 16)),
     ]
 
@@ -193,8 +193,9 @@ def test_run_period_is_the_most_recent_collected_week():
 
 
 def test_plan_switches_to_single_week_once_bootstrapped():
-    """핵심 — 최초 수집을 마쳤다고 기록되면 그 뒤로는 직전 주만 걷는다
-    (매 실행마다 3주치를 다시 긁어 크레딧을 반복 소모하면 안 된다)."""
+    """핵심 — 최초 수집을 마쳤다고 기록되면 그 뒤로도 그대로 직전 주만
+    걷는다(bootstrap 플래그가 is_bootstrapped 조회 결과를 그대로 반영하는지
+    확인 — 폭 자체는 최초든 아니든 이미 1주로 같다)."""
     conn = _SpyConn(_SpyCursor(fetchone_result=("2026-08-19",)))   # 최초 수집 기록 있음
 
     plan = wr.plan_collection(conn, today=date(2026, 8, 24))
