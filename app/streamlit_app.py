@@ -98,6 +98,19 @@ def _conn():
         st.stop()
 
 
+def _live_conn():
+    # 2026-08-27 재현 — Supabase 풀러(특히 무료 티어 트랜잭션 모드)가 유휴
+    # 커넥션을 끊으면, cache_resource가 붙잡고 있던 죽은 커넥션 객체가 그대로
+    # 재사용돼 "the connection is closed"/"server closed the connection
+    # unexpectedly"가 새로고침해도 계속 반복됐다. 매 rerun 진입 시 살아있는지
+    # 확인하고, 죽었으면 캐시를 비운 뒤 새로 연결한다.
+    conn = _conn()
+    if conn.closed:
+        _conn.clear()
+        conn = _conn()
+    return conn
+
+
 def _render_run_banner(conn, run: dict | None) -> None:
     if run is None:
         st.warning(
@@ -597,7 +610,7 @@ def _render_first_run_setup(conn) -> None:
 def main() -> None:
     st.title("기사 모니터링")
 
-    conn = _conn()
+    conn = _live_conn()
     run = dq.get_latest_run(conn)
     _render_run_banner(conn, run)
 
