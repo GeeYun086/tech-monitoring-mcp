@@ -38,6 +38,13 @@ def get_connection() -> psycopg.Connection:
         try:
             return psycopg.connect(
                 settings.database_url, autocommit=True, connect_timeout=CONNECT_TIMEOUT_SECONDS,
+                # 2026-08-27 발견 — Supabase 트랜잭션 모드 풀러(포트 6543)는 매
+                # 트랜잭션마다 다른 백엔드로 연결을 돌려막는다. psycopg3가 반복
+                # 실행되는 쿼리를 자동으로 서버 쪽 prepared statement로 캐싱하면
+                # (기본 동작) 그 이름이 다른 백엔드에 남아있던 것과 충돌해
+                # "DuplicatePreparedStatement" 에러가 난다. prepare_threshold=None
+                # 으로 서버 쪽 prepare 자체를 꺼서 회피한다.
+                prepare_threshold=None,
             )
         except psycopg.OperationalError as exc:
             last_exc = exc

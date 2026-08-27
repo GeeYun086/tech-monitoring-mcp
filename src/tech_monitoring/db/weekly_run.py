@@ -51,11 +51,13 @@ def previous_week_bounds(today: date | None = None) -> tuple[date, date]:
     return week_bounds_for((today or date.today()) - timedelta(days=7))
 
 
-# 최초 1회 수집 범위: 이번 주 + 지난 2주. 라벨링을 시작하려면 후보가
-# 최소 수백 건은 있어야 하고(30건 이상 라벨해야 분류기 학습이 시작된다),
-# 주차가 여럿이어야 relevance_model.build_groups가 "주차 단위" 평가로
-# 전환돼 "지난주 라벨로 이번 주 기사를 맞히는가"를 잴 수 있다.
-BOOTSTRAP_WEEKS = 3
+# 최초 1회 수집 범위(2026-08-27 담당자 결정으로 3주→1주 축소): 직전
+# 완료된 1주만 걷는다. 원래는 라벨 후보를 넉넉히 확보하려고 3주치를
+# 한꺼번에 걷었지만(relevance_model.build_groups의 "주차 단위" 평가도
+# 그래서였다), 팀 실험 중 "부트스트랩도 그냥 매주 갱신과 같은 방식이면
+# 충분하다"는 판단이 나왔다 — 후보를 더 늘리고 싶으면 그때그때
+# scripts/backfill_past_weeks.py로 과거 주를 따로 소급 수집하면 된다.
+BOOTSTRAP_WEEKS = 1
 
 _BOOTSTRAP_KEY = "bootstrap_completed_at"
 
@@ -69,7 +71,8 @@ def is_bootstrapped(conn) -> bool:
 
 def mark_bootstrapped(conn, today: date | None = None) -> None:
     """최초 수집 완료 기록. **수집이 실제로 성공했을 때만** 부른다 —
-    실패했는데 표시해버리면 3주치를 영영 못 걷고 직전 주만 걷게 된다."""
+    실패했는데 표시해버리면 이번에 실패한 그 주를 다시 못 걷고 다음
+    직전 주로 건너뛰게 된다."""
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -83,16 +86,17 @@ def mark_bootstrapped(conn, today: date | None = None) -> None:
 def target_weeks(bootstrap: bool, today: date | None = None) -> list[tuple[date, date]]:
     """이번 실행에서 수집할 달력 주 목록(오래된 주부터).
 
-    **언제나 완료된 주만 걷는다.** 최초에는 완료된 최근 3주, 그 뒤로는 직전
-    주 하나. 진행 중인 주는 어느 경우에도 걷지 않는다 — 그 주는 다음 월요일
-    실행이 온전한 7일치로 담당한다(2026-08-19 담당자 확인).
+    **언제나 완료된 주만 걷는다.** 최초든 그 뒤든 완료된 직전 주 하나뿐이다
+    (2026-08-27부로 최초=평상시 동일하게 통일 — BOOTSTRAP_WEEKS 주석 참고).
+    진행 중인 주는 어느 경우에도 걷지 않는다 — 그 주는 다음 월요일 실행이
+    온전한 7일치로 담당한다(2026-08-19 담당자 확인).
 
     최초에도 이번 주를 뺀 이유: 진행 중인 주를 섞으면 "8/17 주"라는 같은
     이름의 데이터가 이번엔 사흘치, 다음 주엔 7일치가 되어 주차별 비교가
     어긋난다. 라벨의 주차 그룹도 마찬가지로 반쪽짜리 주를 하나 더 만든다.
 
     예) 오늘이 2026-08-19(수)라면
-        최초  : 7/27~8/02, 8/03~8/09, 8/10~8/16   (8/17~ 은 아직 진행 중)
+        최초  : 8/10~8/16   (8/17~ 은 아직 진행 중이라 제외)
         그 뒤 : 8/24(월)에 8/17~8/23
     """
     last_monday, _end = previous_week_bounds(today)
